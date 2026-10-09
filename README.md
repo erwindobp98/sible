@@ -1,4 +1,4 @@
-# ⛏️ Sible Mining Runner
+# ⛏️ Sible Mining Runner (ONLY ACCOUNT LOGIN VIA EMAIL + PASSWOARD + OTP, (NOT SUPPORTED ACCOUNT VIA GOOGLE ATH))
 
 Bot otomasi mining **Sible Network** dengan **Chromium OTP**. Support multi-akun, setup manual sekali, running headless 24/7.
 
