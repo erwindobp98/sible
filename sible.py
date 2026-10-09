@@ -389,13 +389,18 @@ DEFAULT_ACCOUNTS = {
     "accounts": [
         {
             "label": "akun1",
-            "email": "user1@gmail.com",
-            "siblePassword": "passwordSible1",
-            "gmailPassword": "passwordGmail1"
+            "email": "akun1@gmail.com",
+            "siblePassword": "PASSWORD_SIBLE_KAMU",
+            "gmailPassword": "PASSWORD_GMAIL_KAMU"
+        },
+        {
+            "label": "akun2",
+            "email": "akun2@gmail.com",
+            "siblePassword": "PASSWORD_SIBLE_YANIZ",
+            "gmailPassword": "PASSWORD_GMAIL_YANIZ"
         }
     ]
 }
-
 
 def load_accounts(file):
     if not os.path.exists(file):
