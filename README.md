@@ -33,9 +33,9 @@ sible/
 ├── mining-log.csv           # History (auto-generate)
 ├── README.md                # Dokumen ini
 ├── sessions/                # Chromium profile per akun (auto)
-│   ├── nanikz/
-│   ├── yaniz/
-│   └── lilisz/
+│   ├── akun1/
+│   ├── akun2/
+│   └── akun3/
 └── debug/
     └── run.log              # Log lengkap (auto)
 ```
@@ -44,17 +44,45 @@ sible/
 
 ## 📦 Instalasi
 
-### 1. Requirement
+### Requirement
 
 - **Python 3.10+** ([download](https://python.org))
 - **Chromium** (via Playwright)
 - **OS**: Windows / Linux / macOS
 
-### 2. Install Dependencies
+## 🚀 Instalasi
+
+### 1. Clone Repository
 
 ```bash
-pip install httpx rich playwright
-playwright install chromium
+git clone https://github.com/erwindobp98/sible.git
+cd sible
+```
+
+### 2. Install Dependencies
+
+**Isi `requirements.txt`:**
+
+```txt
+httpx>=0.27.0
+rich>=13.7.0
+patchright>=1.0.0
+```
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Install Chromium untuk Patchright
+
+```bash
+python -m patchright install chromium
+```
+
+**Kalau gagal**, pakai fallback playwright:
+
+```bash
+python -m playwright install chromium
 ```
 
 **Kalau di Linux (server tanpa GUI):**
@@ -62,7 +90,7 @@ playwright install chromium
 playwright install --with-deps chromium
 ```
 
-### 3. Verify
+### 4. Verify
 
 ```bash
 python -c "import httpx, rich, playwright; print('OK')"
@@ -92,14 +120,14 @@ Output:
 {
     "accounts": [
         {
-            "label": "nanikz",
-            "email": "itsnanikz081@gmail.com",
+            "label": "akun1",
+            "email": "akun1@gmail.com",
             "siblePassword": "PASSWORD_SIBLE_KAMU",
             "gmailPassword": "PASSWORD_GMAIL_KAMU"
         },
         {
-            "label": "yaniz",
-            "email": "yaniz63263@gmail.com",
+            "label": "akun2",
+            "email": "akun2@gmail.com",
             "siblePassword": "PASSWORD_SIBLE_YANIZ",
             "gmailPassword": "PASSWORD_GMAIL_YANIZ"
         }
@@ -169,10 +197,10 @@ Output:
 
 ### 1. Setup Akun Baru (`--add`)
 
-**Pertama kali**, setup tiap akun:
+**Pertama kali**, setup tiap akun (nama akun sesuai isi config):
 
 ```bash
-python sible.py --add=nanikz
+python sible.py --add=akun1
 ```
 
 **Yang terjadi:**
@@ -181,13 +209,13 @@ python sible.py --add=nanikz
 3. **Kamu selesaikan manual** — consent screen (recovery email, phone, address), 2FA, dll
 4. Setelah sampai inbox → **TUTUP BROWSER manual**
 5. Script **deteksi close** → simpan session
-6. Session tersimpan di `sessions/nanikz/`
+6. Session tersimpan di `sessions/akun1/`
 
 **Log yang diharapkan:**
 ```
-🔐 SETUP GOOGLE SESSION — nanikz
+🔐 SETUP GOOGLE SESSION — akun1
 🌐 goto Gmail...
-📧 auto-isi email: itsnanikz081@gmail.com
+📧 auto-isi email: akun1@gmail.com
 ✅ email diisi
 🔑 auto-isi password
 ✅ password diisi — silakan lanjutkan manual
@@ -197,14 +225,14 @@ python sible.py --add=nanikz
 [KAMU CLOSE BROWSER]
 🍪 Chromium closed
 ✅ Session tersimpan
-✅ Jalankan: python sible.py --only=nanikz
+✅ Jalankan: python sible.py --only=akun1
 ```
 
 ### 2. Jalankan Mining
 
 **Test 1 akun dulu:**
 ```bash
-python sible.py --only=nanikz
+python sible.py --only=akun1
 ```
 
 **Kalau berhasil, jalankan semua:**
@@ -214,7 +242,7 @@ python sible.py
 
 **Log yang diharapkan:**
 ```
-🔐 nanikz (itsnanikz081@gmail.com)
+🔐 nanikz (akun1@gmail.com)
 🗑️ purge email lama dulu...
    ✅ dihapus: 2
 🔐 POST /auth/login (minta OTP baru)...
@@ -239,7 +267,7 @@ python sible.py
 
 **Reset 1 akun:**
 ```bash
-python sible.py --reset-session --add=nanikz
+python sible.py --reset-session --add=akun1
 ```
 
 **Reset semua:**
@@ -286,16 +314,16 @@ Otomatis — sama seperti Run Normal (purge → login → OTP → verify).
 python sible.py --add=nanikz
 
 # Reset session 1 akun (harus pakai --add)
-python sible.py --reset-session --add=nanikz
+python sible.py --reset-session --add=akun1
 
 # Reset semua session
 python sible.py --reset-session
 
 # Jalankan 1 akun
-python sible.py --only=nanikz
+python sible.py --only=akun1
 
 # Exclude 1 akun
-python sible.py --exclude=nanikz
+python sible.py --exclude=akun1
 
 # Jalankan semua akun
 python sible.py
@@ -326,8 +354,8 @@ Get-Content debug/run.log -Wait # Windows PowerShell
 {
     "accounts": [
         {
-            "label": "nanikz",
-            "email": "itsnanikz081@gmail.com",
+            "label": "akun1",
+            "email": "akun1@gmail.com",
             "siblePassword": "PASSWORD_SIBLE",
             "gmailPassword": "PASSWORD_GMAIL"
         }
@@ -342,10 +370,10 @@ Get-Content debug/run.log -Wait # Windows PowerShell
     "createdAt": "2026-10-09T09:00:00.000Z",
     "accounts": [
         {
-            "label": "nanikz",
-            "identifier": "itsnanikz081@gmail.com",
-            "email": "itsnanikz081@gmail.com",
-            "username": "nanikz",
+            "label": "akun1",
+            "identifier": "akun1@gmail.com",
+            "email": "akun1@gmail.com",
+            "username": "akun1",
             "userId": "...",
             "accessToken": "eyJ...",
             "refreshToken": "eyJ...",
@@ -361,7 +389,7 @@ Get-Content debug/run.log -Wait # Windows PowerShell
 
 ```csv
 timestamp,label,username,balance,accumulated,rate,ads,boost,claimed,session,running
-2026-10-09T09:35:46.000Z,nanikz,nanikz,12.08,0.8,0.16,3/3,60,0.8,running,1
+2026-10-09T09:35:46.000Z,akun1,akun1,12.08,0.8,0.16,3/3,60,0.8,running,1
 ```
 
 ---
@@ -535,29 +563,12 @@ Dapatkan dari: **Discord → Server Settings → Integrations → Webhooks → N
 
 ---
 
-## 📄 Lisensi
-
-MIT — bebas pakai, modifikasi, distribusi.
-
----
-
 ## 🙏 Kredit
 
 - **Sible Network** — platform mining
 - **Playwright** — browser automation
 - **Rich** — dashboard terminal
 - **httpx** — async HTTP client
-
----
-
-## 📞 Support
-
-Kalau ada masalah:
-
-1. Cek **Troubleshooting** di atas
-2. Cek `debug/run.log` — log lengkap
-3. Cek `sessions/{label}/` — folder ada?
-4. Buka **issue** dengan log + screenshot
 
 ---
 
