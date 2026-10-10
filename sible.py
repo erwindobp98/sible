@@ -106,7 +106,7 @@ RESET_SESSION = ARGV["reset_session"]
 #  CONFIG
 # ═══════════════════════════════════════════════════════════
 DEFAULTS = {
-    "referralCode": "", "interval": 3600, "jitterSec": 3,
+    "referralCode": "", "interval": 28920, "jitterSec": 3,
     "minDelayBetweenAccountsSec": 2, "maxDelayBetweenAccountsSec": 6,
     "rateLimitBackoffSec": 30, "refreshEndpoint": "/auth/refresh",
     "autoRelogin": True, "reloginOn401": True, "logCsv": True,
