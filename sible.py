@@ -33,7 +33,7 @@ ORIGIN = "https://mine.sible.network"
 
 # ─── FRESH EMAIL THRESHOLD ───
 FRESH_AGE_SEC = 60          # email < 60 detik = fresh → stop scan
-EARLY_RETURN = True         # kalau False, scan semua
+EARLY_RETURN = True         # kalau False, scan semua seperti v2 lama
 
 UAS = [
     "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
@@ -113,23 +113,32 @@ EXCLUDE = ARGV["exclude"]
 #  CONFIG
 # ═══════════════════════════════════════════════════════════
 DEFAULTS = {
-    "referralCode": "ween", "interval": 28920, "jitterSec": 3,
-    "minDelayBetweenAccountsSec": 2, "maxDelayBetweenAccountsSec": 6,
-    "rateLimitBackoffSec": 30, "refreshEndpoint": "/auth/refresh",
-    "autoRelogin": True, "reloginOn401": True, "logCsv": True,
-    "csvFile": "mining-log.csv", "discordWebhook": "", "quiet": False,
+    "referralCode": "ween",
+    "interval": 28920,
+    "jitterSec": 3,
+    "minDelayBetweenAccountsSec": 2,
+    "maxDelayBetweenAccountsSec": 6,
+    "rateLimitBackoffSec": 30,
+    "refreshEndpoint": "/auth/refresh",
+    "autoRelogin": True,
+    "reloginOn401": True,
+    "logCsv": False,
+    "csvFile": "mining-log.csv",
+    "discordWebhook": "",
+    "quiet": False,
     "debugRefresh": True,
+    "logDebug": False,
 
     # ─── IMAP ───
     "imapHost": "imap.gmail.com",
     "imapPort": 993,
     "otpTimeoutSec": 30,
-    "otpPollIntervalSec": 10,
+    "otpPollIntervalSec": 3,
     "otpMaxAgeSec": 300,
     "otpSinceToleranceSec": 270,
 
     # ─── Early return ───
-    "earlyReturnSec": 270,       # ← email < 270 detik → stop scan
+    "earlyReturnSec": 270,
 
     # ─── Retry ───
     "loginMaxRetry": 5,
@@ -169,6 +178,9 @@ _LOG_FILE = None
 
 def init_log():
     global _LOG_FILE
+    if not CFG.get("logDebug", True):
+        _LOG_FILE = None
+        return
     try:
         os.makedirs("debug", exist_ok=True)
         _LOG_FILE = open("debug/run.log", "a", encoding="utf-8", buffering=1)
@@ -179,6 +191,8 @@ def init_log():
 
 
 def log(msg):
+    if not CFG.get("logDebug", True):
+        return
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     if _LOG_FILE:
@@ -627,11 +641,14 @@ class ImapOtpFetcher:
 
                 ids = ids[-30:][::-1]
                 candidates = []
+                stop_scan = False
 
                 # ═══════════════════════════════════════════════════
                 #  SCAN EMAIL — dengan EARLY RETURN
                 # ═══════════════════════════════════════════════════
                 for eid in ids:
+                    if stop_scan:
+                        break
                     try:
                         typ, msg_data = mail.fetch(eid, "(RFC822)")
                         if typ != "OK" or not msg_data:
@@ -691,12 +708,16 @@ class ImapOtpFetcher:
                             if email_ts:
                                 if email_ts < effective_since:
                                     delta = int(effective_since - email_ts)
-                                    log(f"         ⏭️ skip: timestamp terlalu lama ({delta}s)")
-                                    continue
+                                    log(f"         ⏹️ email terlalu lama ({delta}s) — STOP SCAN")
+                                    log(f"   ⏹️ IMAP: email ini & seterusnya lebih lama dari effective_since, tunggu {self.poll}s...")
+                                    stop_scan = True
+                                    break
                                 if (time.time() - email_ts) > self.max_age:
                                     delta = int(time.time() - email_ts)
-                                    log(f"         ⏭️ skip: expired ({delta}s > {self.max_age}s)")
-                                    continue
+                                    log(f"         ⏹️ email expired ({delta}s > {self.max_age}s) — STOP SCAN")
+                                    log(f"   ⏹️ IMAP: email ini & seterusnya lebih lama dari max_age, tunggu {self.poll}s...")
+                                    stop_scan = True
+                                    break
 
                             log(f"         ✅ KANDIDAT!")
 
@@ -708,18 +729,12 @@ class ImapOtpFetcher:
                                 age = (time.time() - email_ts) if email_ts else 9999
                                 log(f"         🎯 code = {code} (age {int(age)}s)")
 
-                                # simpan sebagai kandidat dulu
                                 candidates.append({
                                     "code": code,
                                     "subject": subject,
                                     "date": email_ts or 0,
                                 })
 
-                                # ═══════════════════════════════════════
-                                #  EARLY RETURN — STOP kalau sudah ada kandidat valid
-                                #  (tidak perlu tunggu fresh, karena email
-                                #   sudah lewat filter timestamp & max_age)
-                                # ═══════════════════════════════════════
                                 if EARLY_RETURN:
                                     if age <= self.early_return_sec:
                                         log(f"   ⚡ email fresh ({int(age)}s ≤ {self.early_return_sec}s) — STOP SCAN")
@@ -732,7 +747,6 @@ class ImapOtpFetcher:
                         log(f"      ⚠️ error parsing: {e}")
                         continue
 
-                # ─── kalau tidak ada early return, sort & pilih ───
                 if candidates:
                     candidates.sort(key=lambda x: x["date"], reverse=True)
                     pick = candidates[0]
@@ -892,6 +906,7 @@ async def login_one(cfg, view=None, max_retry=None):
 #  REFRESH / RELOGIN / CALL WITH AUTH
 # ═══════════════════════════════════════════════════════════
 _refresh_locks: dict = {}
+_store_lock = asyncio.Lock()
 
 
 async def refresh_account(account, store):
@@ -914,7 +929,8 @@ async def refresh_account(account, store):
         if d.get("refreshToken"):
             account["refreshToken"] = d["refreshToken"]
         account["refreshedAt"] = datetime.now(timezone.utc).isoformat()
-        save_store(store)
+        async with _store_lock:
+            save_store(store)
         return account
     finally:
         _refresh_locks.pop(key, None)
@@ -952,7 +968,8 @@ async def relogin_account(account, store, view=None):
     if not fresh:
         raise RuntimeError("relogin failed")
     account.update(fresh)
-    save_store(store)
+    async with _store_lock:
+        save_store(store)
     return account
 
 
@@ -1144,7 +1161,8 @@ async def cycle(account, store, view=None):
         f"+{s.get('adBoostPct', 0)}%  {fmt(after.get('currentHourlyReward'))}/hr")
 
     append_csv(account, after, claimed)
-    save_store(store)
+    async with _store_lock:
+        save_store(store)
 
     ads_done = (s.get("adsWatched") or 0) >= (s.get("adMaxPerSession") or 3)
     if not ads_done and s.get("isRunning"):
@@ -1182,21 +1200,6 @@ async def notify_webhook(msg):
 #  ACCOUNT WORKER
 # ═══════════════════════════════════════════════════════════
 async def account_worker(account, store, view):
-    if not account.get("accessToken"):
-        cfg = None
-        for a in load_accounts(ACCOUNTS_FILE):
-            if a["label"] == account.get("label"):
-                cfg = a
-                break
-        if cfg:
-            fresh = await login_one(cfg, view)
-            if fresh:
-                account.update(fresh)
-                save_store(store)
-            else:
-                set_status(view, "❌", "red", "login failed")
-                return
-
     while True:
         try:
             if view:
@@ -1222,7 +1225,6 @@ async def account_worker(account, store, view):
             log(f"[{account.get('label')}] ❌ {e}")
             await notify_webhook(f"❌ **{account.get('label')}** {e}")
             await sleep_sec(60)
-
 
 # ═══════════════════════════════════════════════════════════
 #  MAIN
@@ -1251,6 +1253,7 @@ async def amain():
     accounts = store.get("accounts", [])
     views = [AccountView(c["label"], c["email"]) for c in account_cfg]
 
+    # ─── Isi view dari token yang sudah ada (kalau ada) ───
     for i, c in enumerate(account_cfg):
         for a in accounts:
             if (a.get("label") == c["label"]
@@ -1264,21 +1267,11 @@ async def amain():
     dashboard = Dashboard(console, views)
     dashboard_task = asyncio.create_task(dashboard.run())
 
-    for i, c in enumerate(account_cfg):
-        found = False
-        for a in accounts:
-            if (a.get("label") == c["label"]
-                or a.get("email") == c["email"]
-                or a.get("identifier") == c["email"]):
-                found = True
-                break
-        if not found:
-            fresh = await login_one(c, views[i])
-            if fresh:
-                accounts.append(fresh)
-                store["accounts"] = accounts
-                save_store(store)
-
+    # ═══════════════════════════════════════════════════════════
+    #  Spawn worker secara SEQUENTIAL untuk login (hindari rate limit),
+    #  TAPI begitu satu akun selesai login, worker-nya LANGSUNG
+    #  jalan mining di background — tidak nunggu akun lain login.
+    # ═══════════════════════════════════════════════════════════
     workers = []
     for i, c in enumerate(account_cfg):
         acc = None
@@ -1288,8 +1281,64 @@ async def amain():
                 or a.get("identifier") == c["email"]):
                 acc = a
                 break
-        if acc:
-            workers.append(asyncio.create_task(account_worker(acc, store, views[i])))
+        if acc is None:
+            acc = {
+                "label": c["label"],
+                "identifier": c["email"],
+                "email": c["email"],
+                "username": "",
+                "user": {},
+            }
+            accounts.append(acc)
+            store["accounts"] = accounts
+
+        # ─── Kalau belum punya token → login DULU (blocking) ───
+        #     Begitu login sukses, langsung spawn worker untuk mining.
+        #     Setelah itu baru lanjut ke akun berikutnya.
+        if not acc.get("accessToken"):
+            cfg = None
+            for a in load_accounts(ACCOUNTS_FILE):
+                if a["label"] == c["label"]:
+                    cfg = a
+                    break
+            if not cfg:
+                set_status(views[i], "❌", "red", "no config")
+                log(f"[{c['label']}] ❌ no matching config")
+                continue
+
+            fresh = await login_one(cfg, views[i])
+            if not fresh:
+                set_status(views[i], "❌", "red", "login failed")
+                log(f"[{c['label']}] ❌ login failed, skip")
+                continue
+
+            acc.update(fresh)
+            async with _store_lock:
+                # update store
+                found = False
+                for a in store.get("accounts", []):
+                    if (a.get("label") == acc.get("label")
+                        or a.get("email") == acc.get("email")
+                        or a.get("identifier") == acc.get("identifier")):
+                        a.update(fresh)
+                        found = True
+                        break
+                if not found:
+                    store["accounts"].append(fresh)
+                save_store(store)
+
+        # ─── Sekarang akun ini siap → spawn worker → LANGSUNG mining ───
+        #     Worker jalan di background, spawn loop lanjut ke akun berikutnya.
+        workers.append(
+            asyncio.create_task(account_worker(acc, store, views[i]))
+        )
+        log(f"[{c['label']}] ✅ worker spawned, lanjut akun berikutnya")
+
+        # jeda kecil biar rapi (opsional)
+        await asyncio.sleep(random.uniform(
+            CFG.get("minDelayBetweenAccountsSec", 2),
+            CFG.get("maxDelayBetweenAccountsSec", 6),
+        ))
 
     if not workers:
         console.print("[red]❌ no workers[/red]")
@@ -1313,7 +1362,8 @@ async def amain():
         for w in workers:
             w.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
-        save_store(store)
+        async with _store_lock:
+            save_store(store)
         global _http_client
         if _http_client:
             try:
