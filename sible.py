@@ -129,7 +129,7 @@ DEFAULTS = {
     "otpSinceToleranceSec": 270,
 
     # ─── Early return ───
-    "earlyReturnSec": 60,       # ← email < 60 detik → stop scan
+    "earlyReturnSec": 270,       # ← email < 270 detik → stop scan
 
     # ─── Retry ───
     "loginMaxRetry": 5,
