@@ -1,0 +1,27 @@
+# Config & secrets
+config.json
+accounts.json
+accounts-auth.json
+.env
+
+# Logs & output
+mining-log.csv
+debug/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
