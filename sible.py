@@ -32,8 +32,8 @@ BASE = "https://prod.sible.network/api/v1"
 ORIGIN = "https://mine.sible.network"
 
 # ─── FRESH EMAIL THRESHOLD ───
-FRESH_AGE_SEC = 180          # email < 60 detik = fresh → stop scan
-EARLY_RETURN = True         # kalau False, scan semua seperti v2 lama
+FRESH_AGE_SEC = 60          # email < 60 detik = fresh → stop scan
+EARLY_RETURN = True         # kalau False, scan semua
 
 UAS = [
     "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
@@ -123,16 +123,16 @@ DEFAULTS = {
     # ─── IMAP ───
     "imapHost": "imap.gmail.com",
     "imapPort": 993,
-    "otpTimeoutSec": 120,
-    "otpPollIntervalSec": 3,
+    "otpTimeoutSec": 90,
+    "otpPollIntervalSec": 10,
     "otpMaxAgeSec": 300,
-    "otpSinceToleranceSec": 120,
+    "otpSinceToleranceSec": 270,
 
     # ─── Early return ───
-    "earlyReturnSec": 180,       # ← email < 180 detik → stop scan
+    "earlyReturnSec": 60,       # ← email < 60 detik → stop scan
 
     # ─── Retry ───
-    "loginMaxRetry": 2,
+    "loginMaxRetry": 5,
     "loginRetryDelaySec": 10,
 }
 
