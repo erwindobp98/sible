@@ -123,7 +123,7 @@ DEFAULTS = {
     # ─── IMAP ───
     "imapHost": "imap.gmail.com",
     "imapPort": 993,
-    "otpTimeoutSec": 90,
+    "otpTimeoutSec": 30,
     "otpPollIntervalSec": 10,
     "otpMaxAgeSec": 300,
     "otpSinceToleranceSec": 270,
