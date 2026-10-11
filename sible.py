@@ -1,20 +1,28 @@
+"""
+Sible Mining Runner — IMAP Edition
+"""
+
 import asyncio
 import base64
 import csv
+import email
+import imaplib
 import json
 import os
 import random
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
 import httpx
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.console import Console, Group
+from rich.console import Group
 from rich.text import Text
 
 # ═══════════════════════════════════════════════════════════
@@ -22,7 +30,10 @@ from rich.text import Text
 # ═══════════════════════════════════════════════════════════
 BASE = "https://prod.sible.network/api/v1"
 ORIGIN = "https://mine.sible.network"
-SESSIONS_DIR = "sessions"
+
+# ─── FRESH EMAIL THRESHOLD ───
+FRESH_AGE_SEC = 180          # email < 60 detik = fresh → stop scan
+EARLY_RETURN = True         # kalau False, scan semua seperti v2 lama
 
 UAS = [
     "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
@@ -85,8 +96,6 @@ def parse_argv():
         "accounts": flag("accounts", "accounts.json"),
         "only": flag("only"), "exclude": flag("exclude"),
         "interval": flag("interval"),
-        "add": flag("add"),
-        "reset_session": has("reset-session"),
         "once": has("once"), "loop": has("loop"),
         "quiet": has("quiet"), "debug_refresh": has("debug-refresh"),
     }
@@ -98,30 +107,33 @@ CONFIG_FILE = ARGV["config"]
 ACCOUNTS_FILE = ARGV["accounts"]
 ONLY = ARGV["only"]
 EXCLUDE = ARGV["exclude"]
-ADD_LABEL = ARGV["add"]
-RESET_SESSION = ARGV["reset_session"]
 
 
 # ═══════════════════════════════════════════════════════════
 #  CONFIG
 # ═══════════════════════════════════════════════════════════
 DEFAULTS = {
-    "referralCode": "", "interval": 28920, "jitterSec": 3,
+    "referralCode": "ween", "interval": 28920, "jitterSec": 3,
     "minDelayBetweenAccountsSec": 2, "maxDelayBetweenAccountsSec": 6,
     "rateLimitBackoffSec": 30, "refreshEndpoint": "/auth/refresh",
     "autoRelogin": True, "reloginOn401": True, "logCsv": True,
     "csvFile": "mining-log.csv", "discordWebhook": "", "quiet": False,
     "debugRefresh": True,
 
-    "setupMode": "normal",
-    "purgeMode": "headless",
-    "otpMode": "headless",
+    # ─── IMAP ───
+    "imapHost": "imap.gmail.com",
+    "imapPort": 993,
+    "otpTimeoutSec": 120,
+    "otpPollIntervalSec": 3,
+    "otpMaxAgeSec": 300,
+    "otpSinceToleranceSec": 120,
 
-    "setupTimeoutSec": 1800,
-    "otpTimeoutSec": 180,
-    "otpPollIntervalSec": 5,
-    "sessionsDir": "sessions",
-    "deleteOldSibleEmails": True,
+    # ─── Early return ───
+    "earlyReturnSec": 180,       # ← email < 180 detik → stop scan
+
+    # ─── Retry ───
+    "loginMaxRetry": 2,
+    "loginRetryDelaySec": 10,
 }
 
 
@@ -169,10 +181,6 @@ def init_log():
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
-    try:
-        print(line, flush=True)
-    except Exception:
-        pass
     if _LOG_FILE:
         try:
             _LOG_FILE.write(line + "\n")
@@ -255,30 +263,16 @@ class Dashboard:
         return f"[{color}]{icon} {text}[/{color}]"
 
     def render(self):
-        from rich.columns import Columns
-        from rich.console import Group
-
         now = time.time()
-
-        # ═══ BIKIN PANEL PER AKUN ═══
         panels = []
         for v in self.views:
-            # ─── isi panel ───
             lines = []
-
-            # Status (icon + text + detail)
             status_str = self._build_status_cell(v)
             lines.append(f"[grey50]Status [/grey50]  : {status_str}")
-
-            # Balance
             bal = fmt(v.balance) if v.balance else "-"
             lines.append(f"[grey50]Balance[/grey50]  : [green]{bal}[/green]")
-
-            # Rate
             rate = fmt(v.rate) if v.rate else "-"
             lines.append(f"[grey50]Rate/hr[/grey50]  : [green]{rate}[/green]")
-
-            # Ads + Boost + Run (1 baris)
             ads = f"{v.ads_watched}/{v.ads_max}"
             boost = f"+{v.boost_pct}%"
             run = "[green]✓[/green]" if v.running else "[red]✗[/red]"
@@ -287,8 +281,6 @@ class Dashboard:
                 f"   [grey50]Boost[/grey50] : [green]{boost}[/green]"
                 f"   [grey50]Run[/grey50] : {run}"
             )
-
-            # Cycle + Next
             next_in = ""
             if v.next_wake > now:
                 next_in = f"{int(v.next_wake - now)}s"
@@ -298,53 +290,34 @@ class Dashboard:
                 f"[grey50]Cycle[/grey50]    : {v.cycles}"
                 f"   [grey50]Next[/grey50] : {next_in or '-'}"
             )
-
-            # Error / last msg
             err = v.error or v.last_msg or ""
             if err:
                 lines.append(f"[red]{err[:60]}[/red]")
-
             content = "\n".join(lines)
-
-            # ─── title panel = username ───
             title = f"[bold cyan]{v.username or v.label}[/bold cyan]"
-
-            # ─── subtitle = status login ───
             if v.username and v.balance > 0:
                 subtitle = "[green]logged in[/green]"
             elif v.status_text in ("login failed", "error"):
                 subtitle = "[red]failed[/red]"
             else:
                 subtitle = "[yellow]starting[/yellow]"
-
             panel = Panel(
-                content,
-                title=title,
-                subtitle=subtitle,
-                title_align="left",
-                subtitle_align="right",
-                border_style="grey50",
-                padding=(0, 1),
+                content, title=title, subtitle=subtitle,
+                title_align="left", subtitle_align="right",
+                border_style="grey50", padding=(0, 1),
             )
             panels.append(panel)
-
-        # ═══ GABUNG VERTIKAL ═══
         if panels:
             body = Group(*panels)
         else:
             body = Text("(no accounts)", style="grey50")
-
-        # ═══ PANEL BESAR ═══
         return Panel(
             body,
             title="[bold cyan]⛏️  SIBLE MINING[/bold cyan]",
-            title_align="left",
-            border_style="cyan",
-            padding=(1, 1),
+            title_align="left", border_style="cyan", padding=(1, 1),
         )
 
     async def run(self):
-        """Jalankan dashboard dengan Rich Live."""
         with Live(self.render(), console=self.console,
                   refresh_per_second=4, screen=True) as live:
             self._live = live
@@ -354,6 +327,7 @@ class Dashboard:
                 except Exception:
                     pass
                 await asyncio.sleep(0.25)
+
 
 # ═══════════════════════════════════════════════════════════
 #  HELPER
@@ -391,50 +365,53 @@ DEFAULT_ACCOUNTS = {
             "label": "akun1",
             "email": "akun1@gmail.com",
             "siblePassword": "PASSWORD_SIBLE_KAMU",
-            "gmailPassword": "PASSWORD_GMAIL_KAMU"
-        },
-        {
-            "label": "akun2",
-            "email": "akun2@gmail.com",
-            "siblePassword": "PASSWORD_SIBLE_YANIZ",
-            "gmailPassword": "PASSWORD_GMAIL_YANIZ"
+            "gmailAppPassword": "abcdefghijklmnop"
         }
     ]
 }
+
 
 def load_accounts(file):
     if not os.path.exists(file):
         with open(file, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_ACCOUNTS, f, indent=4)
         print(f"📝 Generated {file} — isi akun, lalu jalankan ulang.")
+        print(f"   ⚠️ gmailAppPassword = 16 karakter App Password")
+        print(f"   ⚠️ Buat di: https://myaccount.google.com/apppasswords")
         sys.exit(0)
     try:
         with open(file, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
         raise ValueError(f"cannot parse {file}: {e}")
+
     lst = data if isinstance(data, list) else data.get("accounts", [])
     out = []
     for a in lst:
         if not isinstance(a, dict):
             continue
         label = (a.get("label") or a.get("email") or "?").strip()
-        email = (a.get("email") or a.get("sibleEmail") or a.get("identifier") or "").strip()
+        email_ = (a.get("email") or a.get("sibleEmail") or a.get("identifier") or "").strip()
         sible_password = (a.get("siblePassword") or a.get("password") or "").strip()
-        gmail_address = (a.get("gmailAddress") or a.get("gmailUser") or email).strip()
-        gmail_password = (a.get("gmailPassword") or a.get("gmailPass") or "").strip()
+        gmail_app = (a.get("gmailAppPassword") or a.get("gmailPass") or "").replace(" ", "").strip()
+
         missing = []
-        if not email: missing.append("email")
+        if not email_: missing.append("email")
         if not sible_password: missing.append("siblePassword")
-        if not gmail_address: missing.append("gmailAddress")
-        if not gmail_password: missing.append("gmailPassword")
+        if not gmail_app: missing.append("gmailAppPassword")
         if missing:
             raise ValueError(f'account "{label}" missing fields: {", ".join(missing)}')
+        if len(gmail_app) != 16:
+            raise ValueError(
+                f'account "{label}": gmailAppPassword harus 16 karakter (got {len(gmail_app)}).\n'
+                f'   Buat di: https://myaccount.google.com/apppasswords'
+            )
+
         out.append({
-            "label": label, "email": email,
+            "label": label, "email": email_,
             "siblePassword": sible_password,
-            "gmailAddress": gmail_address,
-            "gmailPassword": gmail_password,
+            "gmailAddress": email_,
+            "gmailAppPassword": gmail_app,
         })
     return out
 
@@ -458,24 +435,6 @@ def append_csv(account, status, claimed):
     ]
     with open(f, "a", newline="", encoding="utf-8") as fp:
         csv.writer(fp).writerow(line)
-
-
-# ═══════════════════════════════════════════════════════════
-#  SESSION DIR
-# ═══════════════════════════════════════════════════════════
-def get_session_dir(label):
-    safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', label)
-    return os.path.join(CFG.get("sessionsDir", SESSIONS_DIR), safe)
-
-
-def has_session(label):
-    d = get_session_dir(label)
-    if not os.path.isdir(d):
-        return False
-    try:
-        return len(os.listdir(d)) > 0
-    except Exception:
-        return False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -569,648 +528,364 @@ def seconds_left(jwt):
 
 
 # ═══════════════════════════════════════════════════════════
-#  SETUP GOOGLE SESSION (manual + close manual)
+#  IMAP OTP FETCHER (EARLY RETURN)
 # ═══════════════════════════════════════════════════════════
-async def setup_google_session(cfg, view=None):
-    """
-    Alur:
-    1. Buka Chromium (mode setupMode)
-    2. Auto-isi email + password (kalau form ketemu)
-    3. TUNGGU user selesaikan manual (consent, 2FA, dll)
-    4. TUNGGU user CLOSE Chromium manual
-    5. Setelah close → simpan session + verifikasi login
-    """
-    from playwright.async_api import async_playwright
+class ImapOtpFetcher:
+    def __init__(self, cfg):
+        self.host = cfg.get("imapHost", "imap.gmail.com")
+        self.port = cfg.get("imapPort", 993)
+        self.timeout = cfg.get("otpTimeoutSec", 120)
+        self.poll = cfg.get("otpPollIntervalSec", 3)
+        self.max_age = cfg.get("otpMaxAgeSec", 300)
+        self.since_tolerance = cfg.get("otpSinceToleranceSec", 120)
+        self.early_return_sec = cfg.get("earlyReturnSec", 60)
 
-    label = cfg["label"]
-    gmail_address = cfg.get("gmailAddress") or cfg["email"]
-    gmail_password = cfg["gmailPassword"]
-    profile = get_session_dir(label)
-
-    # ─── backup folder lama (kalau ada) ───
-    if os.path.exists(profile):
-        backup = f"{profile}_backup_{int(time.time())}"
+    def _decode_header(self, raw):
+        if not raw:
+            return ""
         try:
-            import shutil
-            shutil.move(profile, backup)
-            log(f"📦 backup session lama → {backup}")
-        except Exception as e:
-            log(f"⚠️ backup gagal: {e}")
-            import shutil
-            shutil.rmtree(profile, ignore_errors=True)
+            parts = decode_header(raw)
+            out = []
+            for content, enc in parts:
+                if isinstance(content, bytes):
+                    try:
+                        out.append(content.decode(enc or "utf-8", errors="ignore"))
+                    except Exception:
+                        out.append(content.decode("utf-8", errors="ignore"))
+                else:
+                    out.append(str(content))
+            return "".join(out)
+        except Exception:
+            return str(raw)
 
-    os.makedirs(profile, exist_ok=True)
-
-    mode = CFG.get("setupMode", "normal").lower()
-    log(f"")
-    log(f"╔════════════════════════════════════════════════════╗")
-    log(f"║   🔐 SETUP GOOGLE SESSION — {label:<20}       ║")
-    log(f"╚════════════════════════════════════════════════════╝")
-    log(f"   mode      : {mode}")
-    log(f"   email     : {gmail_address}")
-    log(f"   profile   : {profile}")
-    log(f"")
-    log(f"   ⚠️  PENTING:")
-    log(f"   1. Script akan auto-isi email + password")
-    log(f"   2. SELESAIKAN consent screen manual di browser")
-    log(f"   3. TUTUP BROWSER manual kalau sudah di inbox")
-    log(f"   4. Session disimpan SETELAH browser ditutup")
-    log(f"")
-
-    if view:
-        set_status(view, "🔐", "blue", "setup manual", "popup")
-
-    async with async_playwright() as p:
-        launch_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ]
-        if mode == "offscreen":
-            launch_args.extend(["--window-position=-2400,-2400", "--window-size=1280,800"])
-        elif mode == "minimized":
-            launch_args.extend(["--start-minimized", "--window-size=1280,800"])
-        else:
-            launch_args.extend(["--window-size=1280,800"])
-
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile,
-            headless=(mode == "headless"),
-            args=launch_args,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="Asia/Jakarta",
-        )
-
+    def _get_body(self, msg):
+        body = ""
         try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            for pg in context.pages[1:]:
-                try:
-                    await pg.close()
-                except Exception:
-                    pass
-
-            # ─── goto Gmail ───
-            log(f"   🌐 goto Gmail...")
-            try:
-                await page.goto("https://mail.google.com/mail/u/0/#inbox",
-                                wait_until="domcontentloaded", timeout=60000)
-            except Exception as e:
-                log(f"   ⚠️ goto error: {e}")
-            await page.wait_for_timeout(3000)
-
-            # ─── deteksi halaman & auto-isi ───
-            await _handle_login_page(page, gmail_address, gmail_password, view)
-
-            # ─── TUNGGU USER CLOSE BROWSER MANUAL ───
-            log(f"")
-            log(f"   ⏳ TUNGGU USER:")
-            log(f"      - Selesaikan login/consent di browser")
-            log(f"      - CLOSE BROWSER manual kalau sudah di inbox")
-            log(f"")
-
-            if view:
-                set_status(view, "⏳", "yellow", "waiting manual", "close browser")
-
-            # monitor: tunggu sampai browser close
-            # context.on("close") di Playwright async tidak reliable
-            # → polling page.closed / context pages
-            browser_closed = False
-            consent_done = False
-            start_wait = time.time()
-            setup_timeout = CFG.get("setupTimeoutSec", 1800)
-
-            while time.time() - start_wait < setup_timeout:
-                try:
-                    # cek: apakah browser sudah closed?
-                    if context.pages:
-                        # masih ada page, cek apakah sudah di inbox
-                        all_pages = context.pages
-                        if not all_pages:
-                            browser_closed = True
-                            break
-
-                        # cek page utama
-                        main_page = all_pages[0]
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ctype = part.get_content_type()
+                    if ctype == "text/plain":
                         try:
-                            url = main_page.url
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                body += payload.decode("utf-8", errors="ignore")
                         except Exception:
-                            url = ""
-
-                        # cek apakah sudah di inbox (untuk log saja)
-                        if "mail.google.com/mail/u/" in url and not consent_done:
-                            # cek elemen inbox
-                            try:
-                                compose = await main_page.query_selector('div[gh="cm"]')
-                                if compose:
-                                    consent_done = True
-                                    log(f"   ✅ inbox terdeteksi — silakan CLOSE browser")
-                                    if view:
-                                        set_status(view, "✅", "green", "inbox OK", "close browser")
-                            except Exception:
-                                pass
-                    else:
-                        browser_closed = True
-                        break
-                except Exception:
-                    # kalau ada exception → mungkin browser closed
-                    browser_closed = True
-                    break
-
-                await asyncio.sleep(2)
-
-            # ─── tutup context (kalau belum) ───
-            try:
-                await context.close()
-            except Exception:
-                pass
-
-            log(f"")
-            log(f"   🍪 Chromium closed")
-
-            # ─── verifikasi session ───
-            if not consent_done:
-                log(f"   ⚠️ inbox tidak terdeteksi — verifikasi manual...")
-                # tetap cek folder
-                if not has_session(label):
-                    log(f"   ❌ session folder kosong")
-                    if view:
-                        set_status(view, "❌", "red", "setup failed")
-                    return False
-
-            log(f"   ✅ Session tersimpan di: {profile}")
-            log(f"   ✅ Sekarang jalankan: python sible.py --only={label}")
-
-            if view:
-                set_status(view, "✅", "green", "session saved")
-
-            return True
-
-        except Exception as e:
-            log(f"   ❌ setup error: {e}")
-            try:
-                await context.close()
-            except Exception:
-                pass
-            if view:
-                set_status(view, "❌", "red", "setup error", str(e)[:30])
-            return False
-
-
-async def _handle_login_page(page, email, password, view=None):
-    """
-    Auto-isi form login kalau ketemu.
-    Loop sampai email+password terisi ATAU sudah di inbox.
-    """
-    log(f"   🔍 handle login page...")
-    deadline = time.time() + 60
-    email_filled = False
-    password_filled = False
-
-    while time.time() < deadline:
-        try:
-            url = page.url
-            log(f"   🌐 url: {url}")
-
-            # ─── sudah di inbox? berhenti ───
-            if "mail.google.com/mail/u/" in url:
-                try:
-                    compose = await page.query_selector('div[gh="cm"]')
-                    if compose:
-                        log(f"   ✅ sudah di inbox")
-                        return True
-                except Exception:
-                    pass
-
-            # ─── workspace.google.com → cari tombol Sign in ───
-            if "workspace.google.com" in url:
-                log(f"   ⚠️ workspace page")
-                clicked = False
-                for sel in ['a:has-text("Sign in")', 'a:has-text("Masuk")',
-                            'a[href*="accounts.google.com"]']:
-                    try:
-                        btn = await page.query_selector(sel)
-                        if btn and await btn.is_visible():
-                            await btn.click()
-                            clicked = True
-                            log(f"   ✅ clicked: {sel}")
-                            await page.wait_for_timeout(3000)
-                            break
-                    except Exception:
-                        continue
-                if not clicked:
-                    try:
-                        await page.goto("https://accounts.google.com/signin",
-                                        wait_until="domcontentloaded", timeout=30000)
-                        await page.wait_for_timeout(2000)
-                    except Exception:
-                        pass
-                continue
-
-            # ─── isi email ───
-            if not email_filled:
-                email_input = None
-                for sel in ['input[type="email"]', 'input[name="identifier"]',
-                            'input[autocomplete="username"]', 'input#identifierId']:
-                    try:
-                        email_input = await page.wait_for_selector(sel, timeout=2000, state="visible")
-                        if email_input:
-                            break
-                    except Exception:
-                        continue
-
-                if email_input:
-                    log(f"   📧 auto-isi email: {email}")
-                    if view:
-                        set_status(view, "📧", "blue", "auto-isi email")
-                    await email_input.click()
-                    await email_input.fill(email)
-                    await page.wait_for_timeout(500)
-
-                    for sel in ['#identifierNext', 'button:has-text("Next")',
-                                'button:has-text("Berikutnya")']:
+                            pass
+                    elif ctype == "text/html" and not body:
                         try:
-                            btn = await page.query_selector(sel)
-                            if btn and await btn.is_visible():
-                                await btn.click()
-                                break
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                body += payload.decode("utf-8", errors="ignore")
                         except Exception:
-                            continue
-                    else:
-                        await email_input.press("Enter")
-
-                    email_filled = True
-                    log(f"   ✅ email diisi")
-                    await page.wait_for_timeout(4000)
-                    continue
-
-            # ─── isi password ───
-            if email_filled and not password_filled:
-                pwd_input = None
-                for sel in ['input[type="password"]', 'input[name="Passwd"]',
-                            'input[name="password"]']:
-                    try:
-                        pwd_input = await page.wait_for_selector(sel, timeout=3000, state="visible")
-                        if pwd_input:
-                            break
-                    except Exception:
-                        continue
-
-                if pwd_input:
-                    log(f"   🔑 auto-isi password")
-                    if view:
-                        set_status(view, "🔑", "blue", "auto-isi password")
-                    await pwd_input.click()
-                    await pwd_input.fill(password)
-                    await page.wait_for_timeout(500)
-
-                    for sel in ['#passwordNext', 'button:has-text("Next")',
-                                'button:has-text("Berikutnya")']:
-                        try:
-                            btn = await page.query_selector(sel)
-                            if btn and await btn.is_visible():
-                                await btn.click()
-                                break
-                        except Exception:
-                            continue
-                    else:
-                        await pwd_input.press("Enter")
-
-                    password_filled = True
-                    log(f"   ✅ password diisi — silakan lanjutkan manual")
-                    if view:
-                        set_status(view, "⏳", "yellow", "lanjutkan manual")
-                    await page.wait_for_timeout(3000)
-                    return True  # ← stop auto-isi, tunggu user manual
-
-        except Exception as e:
-            log(f"   ⚠️ handle error: {e}")
-
-        await asyncio.sleep(2)
-
-    return False
-
-
-# ═══════════════════════════════════════════════════════════
-#  PURGE OLD SIBLE EMAILS (headless)
-# ═══════════════════════════════════════════════════════════
-async def purge_old_sible_emails(cfg, view=None):
-    from playwright.async_api import async_playwright
-
-    label = cfg["label"]
-    profile = get_session_dir(label)
-    if not has_session(label):
-        return False
-
-    mode = CFG.get("purgeMode", "headless").lower()
-    log(f"🗑️ purge email lama (mode={mode})...")
-
-    async with async_playwright() as p:
-        launch_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run", "--no-default-browser-check",
-        ]
-        if mode == "offscreen":
-            launch_args.extend(["--window-position=-2400,-2400", "--window-size=1280,800"])
-        elif mode == "minimized":
-            launch_args.extend(["--start-minimized", "--window-size=1280,800"])
-        else:
-            launch_args.append("--window-size=1280,800")
-
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile,
-            headless=(mode == "headless"),
-            args=launch_args,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US", timezone_id="Asia/Jakarta",
-        )
-        try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto("https://mail.google.com/mail/u/0/#inbox",
-                            wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(5000)
-
-            if "mail.google.com/mail" not in page.url:
-                return False
-
-            deleted = 0
-            for _ in range(10):
-                rows = []
-                try:
-                    rows = await page.query_selector_all("tr.zA")
-                except Exception:
-                    break
-                if not rows:
-                    break
-
-                target_row = None
-                for row in rows[:20]:
-                    try:
-                        s_el = await row.query_selector(".yX.xY .yP, .zF")
-                        j_el = await row.query_selector(".y6 span")
-                        s = (await s_el.inner_text()).strip().lower() if s_el else ""
-                        j = (await j_el.inner_text()).strip().lower() if j_el else ""
-                        if "sible" in s or "sible" in j:
-                            target_row = row
-                            break
-                    except Exception:
-                        continue
-
-                if not target_row:
-                    break
-
-                try:
-                    cb = await target_row.query_selector('div[role="checkbox"]')
-                    if not cb:
-                        cb = await target_row.query_selector('input[type="checkbox"]')
-                    if cb:
-                        await cb.click()
-                        await page.wait_for_timeout(600)
-                        delete_btn = await page.query_selector('div[aria-label*="Hapus"]')
-                        if not delete_btn:
-                            delete_btn = await page.query_selector('div[aria-label*="Delete"]')
-                        if delete_btn:
-                            await delete_btn.click()
-                        else:
-                            await page.keyboard.press("Delete")
-                        await page.wait_for_timeout(1200)
-                        deleted += 1
-                    else:
-                        break
-                except Exception:
-                    break
-
-            log(f"   ✅ dihapus: {deleted}")
-            return True
-        finally:
-            try:
-                await context.close()
-            except Exception:
-                pass
-
-
-# ═══════════════════════════════════════════════════════════
-#  FETCH OTP (headless)
-# ═══════════════════════════════════════════════════════════
-async def fetch_otp_headless(cfg, view=None):
-    from playwright.async_api import async_playwright
-
-    label = cfg["label"]
-    profile = get_session_dir(label)
-    mode = CFG.get("otpMode", "headless").lower()
-    log(f"📬 scan OTP (mode={mode})...")
-
-    async with async_playwright() as p:
-        launch_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run", "--no-default-browser-check",
-        ]
-        if mode == "offscreen":
-            launch_args.extend(["--window-position=-2400,-2400", "--window-size=1280,800"])
-        elif mode == "minimized":
-            launch_args.extend(["--start-minimized", "--window-size=1280,800"])
-        else:
-            launch_args.append("--window-size=1280,800")
-
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile,
-            headless=(mode == "headless"),
-            args=launch_args,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US", timezone_id="Asia/Jakarta",
-        )
-        try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto("https://mail.google.com/mail/u/0/#inbox",
-                            wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(5000)
-
-            if "mail.google.com/mail" not in page.url:
-                return None
-
-            return await _scan_otp(page, view)
-        finally:
-            try:
-                await context.close()
-            except Exception:
-                pass
-
-
-async def _scan_otp(page, view=None):
-    started_at = time.time()
-    poll = CFG.get("otpPollIntervalSec", 5)
-    max_wait = CFG.get("otpTimeoutSec", 180)
-    attempt = 0
-
-    while time.time() - started_at < max_wait:
-        attempt += 1
-        try:
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(3000)
+                            pass
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode("utf-8", errors="ignore")
         except Exception:
             pass
+        return body
 
-        rows = []
+    def fetch_sync(self, gmail_address, gmail_app_password, since_ts):
+        effective_since = since_ts - self.since_tolerance
+
+        log(f"   📬 IMAP: connecting {self.host}:{self.port}...")
+        log(f"   ⏱️ since_ts={int(since_ts)} effective_since={int(effective_since)} (tolerance {self.since_tolerance}s)")
+
         try:
-            rows = await page.query_selector_all("tr.zA")
-        except Exception:
-            rows = []
-
-        log(f"   attempt {attempt}: {len(rows)} rows")
-
-        for row in rows[:5]:
-            try:
-                sender_el = await row.query_selector(".yX.xY .yP, .zF")
-                subj_el = await row.query_selector(".y6 span")
-                sender = (await sender_el.inner_text()).strip() if sender_el else ""
-                subject = (await subj_el.inner_text()).strip() if subj_el else ""
-                s_low = sender.lower()
-                subj_low = subject.lower()
-
-                if "sible" not in s_low and "sible" not in subj_low:
-                    continue
-                if any(x in subj_low for x in ("reset", "password", "welcome")):
-                    continue
-                if not ("verification" in subj_low or "code" in subj_low or "otp" in subj_low):
-                    continue
-
-                log(f"   ✅ email: {subject[:50]}")
-                await row.click()
-                await page.wait_for_timeout(3000)
-
-                body = ""
-                for sel in ["div.a3s", ".a3s.aXjCH", "div.a3s.aiL"]:
-                    body_el = await page.query_selector(sel)
-                    if body_el:
-                        body = await body_el.inner_text()
-                        if body:
-                            break
-
-                m = re.search(r"\b(\d{6})\b", body)
-                if not m:
-                    m = re.search(r"\b(\d{6})\b", subject)
-                if m:
-                    code = m.group(1)
-                    log(f"   ✅ OTP = {code}")
-                    return code
-
-                try:
-                    await page.go_back()
-                    await page.wait_for_timeout(2000)
-                except Exception:
-                    pass
-            except Exception as e:
-                log(f"   ⚠️ row error: {e}")
-                continue
-
-        await sleep_sec(poll)
-
-    return None
-
-
-# ═══════════════════════════════════════════════════════════
-#  LOGIN ONE
-# ═══════════════════════════════════════════════════════════
-async def login_one(cfg, view=None):
-    label = cfg["label"]
-    email = cfg["email"]
-    password = cfg["siblePassword"]
-
-    log(f"🔐 {label} ({email})")
-    ua = random_ua()
-
-    # ═══════════════════════════════════════════════════════
-    #  STEP 0: cek session — kalau belum ada, setup Google dulu
-    # ═══════════════════════════════════════════════════════
-    if not has_session(label):
-        log(f"⚠️ session {label} belum ada → setup Google (mode NORMAL)")
-        set_status(view, "🔐", "blue", "Google setup", "(popup)")
-        ok = await setup_google_session(cfg, view)
-        if not ok:
-            set_status(view, "❌", "red", "Google setup failed")
+            mail = imaplib.IMAP4_SSL(self.host, self.port)
+            mail.login(gmail_address, gmail_app_password)
+            mail.select("INBOX")
+            log(f"   ✅ IMAP: logged in")
+        except Exception as e:
+            log(f"   ❌ IMAP login failed: {e}")
             return None
 
-    # ═══════════════════════════════════════════════════════
-    #  STEP 1: PURGE dulu (hapus email Sible lama)
-    # ═══════════════════════════════════════════════════════
-    if CFG.get("deleteOldSibleEmails", True):
-        set_status(view, "🗑️", "yellow", "purging old emails")
-        log(f"🗑️ purge email lama dulu...")
-        await purge_old_sible_emails(cfg, view)
+        try:
+            deadline = time.time() + self.timeout
+            attempt = 0
 
-    # ═══════════════════════════════════════════════════════
-    #  STEP 2: POST /auth/login (Sible kirim OTP baru)
-    # ═══════════════════════════════════════════════════════
-    set_status(view, "🔐", "blue", "login Sible")
-    log(f"🔐 POST /auth/login (minta OTP baru)...")
-    try:
-        login_resp = await raw("/auth/login", method="POST",
-                               body={"identifier": email, "password": password},
-                               headers_extra={"user-agent": ua})
-    except RuntimeError as e:
-        set_status(view, "❌", "red", "login failed", str(e)[:40])
-        log(f"❌ login: {e}")
-        return None
+            while time.time() < deadline:
+                attempt += 1
 
-    if not (login_resp.get("data") or {}).get("needsOtp"):
-        set_status(view, "⚠️", "yellow", "unexpected response")
-        return None
+                since_date = (datetime.now() - timedelta(minutes=15)).strftime("%d-%b-%Y")
+                try:
+                    typ, data = mail.search(None, f'(SINCE "{since_date}")')
+                except Exception:
+                    typ, data = mail.search(None, "ALL")
 
-    otp_email = login_resp["data"].get("email") or email
-    log(f"📧 OTP → {otp_email}")
+                if typ != "OK":
+                    log(f"   ⚠️ IMAP search failed: {typ}")
+                    time.sleep(self.poll)
+                    continue
 
-    # ═══════════════════════════════════════════════════════
-    #  STEP 3: baca OTP baru (headless)
-    # ═══════════════════════════════════════════════════════
-    set_status(view, "📬", "yellow", "reading OTP")
-    log(f"📬 scan OTP baru...")
-    try:
-        code = await fetch_otp_headless(cfg, view)
-    except Exception as e:
-        set_status(view, "❌", "red", "OTP failed", str(e)[:40])
-        log(f"❌ OTP failed: {e}")
-        return None
+                ids = data[0].split() if data and data[0] else []
+                if not ids:
+                    log(f"   attempt {attempt}: 0 email")
+                    time.sleep(self.poll)
+                    continue
 
-    if not code:
-        set_status(view, "❌", "red", "OTP not found")
-        return None
+                ids = ids[-30:][::-1]
+                candidates = []
 
-    log(f"✅ OTP: {code}")
+                # ═══════════════════════════════════════════════════
+                #  SCAN EMAIL — dengan EARLY RETURN
+                # ═══════════════════════════════════════════════════
+                for eid in ids:
+                    try:
+                        typ, msg_data = mail.fetch(eid, "(RFC822)")
+                        if typ != "OK" or not msg_data:
+                            continue
 
-    # ─── 4. verify OTP ───
-    set_status(view, "🔐", "blue", "verifying OTP")
-    try:
-        verify_resp = await raw("/auth/verify-otp", method="POST",
-                                body={"email": otp_email, "code": code, "purpose": "login"},
-                                headers_extra={"user-agent": ua})
-    except RuntimeError as e:
-        set_status(view, "❌", "red", "verify failed", str(e)[:40])
-        log(f"❌ verify: {e}")
-        return None
+                        for response_part in msg_data:
+                            if not isinstance(response_part, tuple):
+                                continue
 
-    d = verify_resp.get("data") or {}
-    if not d.get("accessToken"):
-        set_status(view, "❌", "red", "no token")
-        return None
+                            msg = email.message_from_bytes(response_part[1])
+                            from_ = self._decode_header(msg.get("From", ""))
+                            subject = self._decode_header(msg.get("Subject", ""))
+                            body = self._get_body(msg)
 
-    username = d["user"]["username"]
-    balance = d["user"].get("balance", 0)
-    log(f"✅ {username}  bal={balance}")
-    if view:
-        view.username = username
-        view.balance = balance
-        set_status(view, "✅", "green", "logged in", username)
+                            date_hdr = msg.get("Date", "")
+                            email_ts = None
+                            if date_hdr:
+                                try:
+                                    email_ts = parsedate_to_datetime(date_hdr).timestamp()
+                                except Exception:
+                                    pass
 
-    return {
-        "label": label, "identifier": email,
-        "email": d["user"]["email"], "username": username,
-        "userId": d["user"]["id"],
-        "accessToken": d["accessToken"],
-        "refreshToken": d.get("refreshToken", ""),
-        "savedAt": datetime.now(timezone.utc).isoformat(),
-        "refreshedAt": datetime.now(timezone.utc).isoformat(),
-        "user": d["user"],
-    }
+                            from_low = from_.lower()
+                            subj_low = subject.lower()
+                            body_low = body.lower()
+
+                            log(f"      📧 from='{from_[:50]}'")
+                            log(f"         subj='{subject[:60]}'")
+                            if email_ts:
+                                age = time.time() - email_ts
+                                log(f"         ts_age={int(age)}s (email {int(age/60)}m lalu)")
+
+                            # ─── FILTER ───
+                            if "google.com" in from_low:
+                                log(f"         ⏭️ skip: google.com")
+                                continue
+                            if "sible" not in from_low and "sible" not in subj_low:
+                                log(f"         ⏭️ skip: bukan sible")
+                                continue
+                            if any(x in subj_low for x in ("reset", "password", "welcome")):
+                                log(f"         ⏭️ skip: reset/password/welcome")
+                                continue
+
+                            looks_otp = (
+                                "verification" in subj_low
+                                or "code" in subj_low
+                                or "otp" in subj_low
+                                or "sign-in" in subj_low
+                                or "verify" in subj_low
+                                or "verification code" in body_low
+                                or "your code" in body_low
+                            )
+                            if not looks_otp:
+                                log(f"         ⏭️ skip: bukan OTP")
+                                continue
+
+                            if email_ts:
+                                if email_ts < effective_since:
+                                    delta = int(effective_since - email_ts)
+                                    log(f"         ⏭️ skip: timestamp terlalu lama ({delta}s)")
+                                    continue
+                                if (time.time() - email_ts) > self.max_age:
+                                    delta = int(time.time() - email_ts)
+                                    log(f"         ⏭️ skip: expired ({delta}s > {self.max_age}s)")
+                                    continue
+
+                            log(f"         ✅ KANDIDAT!")
+
+                            match = re.search(r"\b(\d{6})\b", body)
+                            if not match:
+                                match = re.search(r"\b(\d{6})\b", subject)
+                            if match:
+                                code = match.group(1)
+                                age = (time.time() - email_ts) if email_ts else 9999
+                                log(f"         🎯 code = {code} (age {int(age)}s)")
+
+                                # simpan sebagai kandidat dulu
+                                candidates.append({
+                                    "code": code,
+                                    "subject": subject,
+                                    "date": email_ts or 0,
+                                })
+
+                                # ═══════════════════════════════════════
+                                #  EARLY RETURN — STOP kalau sudah ada kandidat valid
+                                #  (tidak perlu tunggu fresh, karena email
+                                #   sudah lewat filter timestamp & max_age)
+                                # ═══════════════════════════════════════
+                                if EARLY_RETURN:
+                                    if age <= self.early_return_sec:
+                                        log(f"   ⚡ email fresh ({int(age)}s ≤ {self.early_return_sec}s) — STOP SCAN")
+                                    else:
+                                        log(f"   ⚡ kandidat valid ({int(age)}s) — STOP SCAN")
+                                    log(f"   ✅ IMAP: OTP = {code} (\"{subject[:40]}\")")
+                                    return code
+
+                    except Exception as e:
+                        log(f"      ⚠️ error parsing: {e}")
+                        continue
+
+                # ─── kalau tidak ada early return, sort & pilih ───
+                if candidates:
+                    candidates.sort(key=lambda x: x["date"], reverse=True)
+                    pick = candidates[0]
+                    log(f"   ✅ IMAP: OTP = {pick['code']} (\"{pick['subject'][:40]}\")")
+                    return pick["code"]
+
+                log(f"   attempt {attempt}: {len(ids)} email, 0 kandidat")
+                time.sleep(self.poll)
+
+            log(f"   ❌ IMAP: OTP timeout")
+            return None
+        finally:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+    async def fetch(self, gmail_address, gmail_app_password, since_ts):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.fetch_sync, gmail_address, gmail_app_password, since_ts
+        )
+
+
+# ═══════════════════════════════════════════════════════════
+#  LOGIN ONE (WITH RETRY)
+# ═══════════════════════════════════════════════════════════
+_imap_fetcher = None
+
+
+def get_imap_fetcher():
+    global _imap_fetcher
+    if _imap_fetcher is None:
+        _imap_fetcher = ImapOtpFetcher(CFG)
+    return _imap_fetcher
+
+
+async def login_one(cfg, view=None, max_retry=None):
+    if max_retry is None:
+        max_retry = CFG.get("loginMaxRetry", 2)
+    retry_delay = CFG.get("loginRetryDelaySec", 10)
+
+    label = cfg["label"]
+    email_ = cfg["email"]
+    password = cfg["siblePassword"]
+    gmail_address = cfg.get("gmailAddress") or email_
+    gmail_app = cfg["gmailAppPassword"]
+
+    for attempt in range(1, max_retry + 1):
+        log(f"🔐 {label} ({email_}) — attempt {attempt}/{max_retry}")
+        if view:
+            set_status(view, "🔐", "blue", "login", f"{attempt}/{max_retry}")
+
+        ua = random_ua()
+
+        set_status(view, "🔐", "blue", "login Sible")
+        log(f"🔐 POST /auth/login...")
+        login_started = time.time()
+        try:
+            login_resp = await raw("/auth/login", method="POST",
+                                   body={"identifier": email_, "password": password},
+                                   headers_extra={"user-agent": ua})
+        except RuntimeError as e:
+            set_status(view, "❌", "red", "login failed", str(e)[:40])
+            log(f"❌ login: {e}")
+            if view:
+                view.error = str(e)[:50]
+            if attempt < max_retry:
+                log(f"🔄 retry dalam {retry_delay}s...")
+                await sleep_sec(retry_delay)
+                continue
+            return None
+
+        if not (login_resp.get("data") or {}).get("needsOtp"):
+            set_status(view, "⚠️", "yellow", "unexpected response")
+            log(f"⚠️ needsOtp false")
+            if attempt < max_retry:
+                log(f"🔄 retry dalam {retry_delay}s...")
+                await sleep_sec(retry_delay)
+                continue
+            return None
+
+        otp_email = login_resp["data"].get("email") or email_
+        log(f"📧 OTP → {otp_email}")
+
+        set_status(view, "📬", "yellow", "reading OTP", "(IMAP)")
+        log(f"📬 IMAP scan OTP...")
+        try:
+            fetcher = get_imap_fetcher()
+            code = await fetcher.fetch(gmail_address, gmail_app, login_started)
+        except Exception as e:
+            set_status(view, "❌", "red", "OTP failed", str(e)[:40])
+            log(f"❌ IMAP failed: {e}")
+            if attempt < max_retry:
+                log(f"🔄 retry dalam {retry_delay}s...")
+                await sleep_sec(retry_delay)
+                continue
+            return None
+
+        if not code:
+            set_status(view, "❌", "red", "OTP not found")
+            log(f"❌ OTP tidak ketemu")
+            if attempt < max_retry:
+                log(f"🔄 retry dalam {retry_delay}s...")
+                await sleep_sec(retry_delay)
+                continue
+            return None
+
+        log(f"✅ OTP: {code}")
+
+        set_status(view, "🔐", "blue", "verifying OTP")
+        try:
+            verify_resp = await raw("/auth/verify-otp", method="POST",
+                                    body={"email": otp_email, "code": code, "purpose": "login"},
+                                    headers_extra={"user-agent": ua})
+        except RuntimeError as e:
+            set_status(view, "❌", "red", "verify failed", str(e)[:40])
+            log(f"❌ verify: {e}")
+            if attempt < max_retry:
+                log(f"🔄 retry dalam {retry_delay}s...")
+                await sleep_sec(retry_delay)
+                continue
+            return None
+
+        d = verify_resp.get("data") or {}
+        if not d.get("accessToken"):
+            set_status(view, "❌", "red", "no token")
+            if attempt < max_retry:
+                await sleep_sec(retry_delay)
+                continue
+            return None
+
+        username = d["user"]["username"]
+        balance = d["user"].get("balance", 0)
+        log(f"✅ {username}  bal={balance}")
+        if view:
+            view.username = username
+            view.balance = balance
+            set_status(view, "✅", "green", "logged in", username)
+
+        return {
+            "label": label, "identifier": email_,
+            "email": d["user"]["email"], "username": username,
+            "userId": d["user"]["id"],
+            "accessToken": d["accessToken"],
+            "refreshToken": d.get("refreshToken", ""),
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+            "refreshedAt": datetime.now(timezone.utc).isoformat(),
+            "user": d["user"],
+        }
+
+    log(f"❌ {label}: login failed after {max_retry} attempts")
+    return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1423,7 +1098,8 @@ async def cycle(account, store, view=None):
                 continue
             set_status(view, "⚠️", "yellow", "ad error", str(e)[:30])
             break
-        await sleep_sec(rand_int(600, 1800) / 1000)
+        if watched < cap:
+            await sleep_sec(10)
 
     set_status(view, "💰", "yellow", "checking claim")
     fresh = (await call_with_auth("/mining/status", account, store, view=view))["data"]
@@ -1537,6 +1213,7 @@ async def account_worker(account, store, view):
             if view:
                 view.next_wake = time.time() + wait_s
                 set_status(view, "💤", "grey50", "sleeping", f"{wait_s}s")
+            log(f"[{account.get('label')}] 💤 sleeping {wait_s}s...")
             await sleep_sec(wait_ms / 1000)
             if not LOOP:
                 break
@@ -1545,71 +1222,6 @@ async def account_worker(account, store, view):
             log(f"[{account.get('label')}] ❌ {e}")
             await notify_webhook(f"❌ **{account.get('label')}** {e}")
             await sleep_sec(60)
-
-
-# ═══════════════════════════════════════════════════════════
-#  MODE --add
-# ═══════════════════════════════════════════════════════════
-async def amain_add(label):
-    init_log()
-    console = Console()
-
-    try:
-        account_cfg = load_accounts(ACCOUNTS_FILE)
-    except Exception as e:
-        console.print(f"[red]❌ {e}[/red]")
-        sys.exit(1)
-
-    cfg = None
-    for a in account_cfg:
-        if a["label"] == label:
-            cfg = a
-            break
-
-    if not cfg:
-        console.print(f"[red]❌ label '{label}' tidak ditemukan[/red]")
-        console.print(f"[yellow]Tersedia:[/yellow]")
-        for a in account_cfg:
-            console.print(f"  - {a['label']}")
-        sys.exit(1)
-
-    view = AccountView(cfg["label"], cfg["email"])
-    ok = await setup_google_session(cfg, view)
-
-    if ok:
-        console.print()
-        console.print(f"[green]✅ Session tersimpan[/green]")
-        console.print(f"[green]✅ Jalankan: python sible.py --only={label}[/green]")
-    else:
-        console.print(f"[red]❌ Setup gagal[/red]")
-        sys.exit(1)
-
-
-# ═══════════════════════════════════════════════════════════
-#  RESET SESSION
-# ═══════════════════════════════════════════════════════════
-def do_reset_session(label=None):
-    import shutil
-    try:
-        account_cfg = load_accounts(ACCOUNTS_FILE)
-    except Exception:
-        account_cfg = []
-
-    targets = [label] if label else [a["label"] for a in account_cfg]
-
-    for lb in targets:
-        d = get_session_dir(lb)
-        if os.path.exists(d):
-            try:
-                shutil.rmtree(d, ignore_errors=False)
-            except Exception:
-                shutil.rmtree(d, ignore_errors=True)
-            if os.path.exists(d):
-                print(f"❌ {d} masih ada (locked)")
-            else:
-                print(f"🗑️  removed {d}")
-        else:
-            print(f"ℹ️  {d} not found")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1712,12 +1324,6 @@ async def amain():
 
 def main():
     try:
-        if RESET_SESSION:
-            do_reset_session(ADD_LABEL)
-            return
-        if ADD_LABEL:
-            asyncio.run(amain_add(ADD_LABEL))
-            return
         asyncio.run(amain())
     except KeyboardInterrupt:
         pass
