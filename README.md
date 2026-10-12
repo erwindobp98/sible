@@ -82,22 +82,20 @@ Field di bawah ini **persis sama** dengan `DEFAULTS` di dalam `sible.py`:
     "refreshEndpoint": "/auth/refresh",
     "autoRelogin": true,
     "reloginOn401": true,
-    "logCsv": true,
+    "logCsv": false,
     "csvFile": "mining-log.csv",
     "discordWebhook": "",
     "quiet": false,
     "debugRefresh": true,
-
+    "logDebug": false,
     "imapHost": "imap.gmail.com",
     "imapPort": 993,
-    "otpTimeoutSec": 120,
+    "otpTimeoutSec": 15,
     "otpPollIntervalSec": 3,
     "otpMaxAgeSec": 300,
-    "otpSinceToleranceSec": 120,
-
-    "earlyReturnSec": 60,
-
-    "loginMaxRetry": 2,
+    "otpSinceToleranceSec": 270,
+    "earlyReturnSec": 270,
+    "loginMaxRetry": 5,
     "loginRetryDelaySec": 10
 }
 ```
