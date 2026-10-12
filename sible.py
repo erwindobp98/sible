@@ -1,5 +1,5 @@
 """
-Sible Mining Runner
+Sible Mining Runner — IMAP Edition
 """
 
 import asyncio
@@ -31,9 +31,8 @@ from rich.text import Text
 BASE = "https://prod.sible.network/api/v1"
 ORIGIN = "https://mine.sible.network"
 
-# ─── FRESH EMAIL THRESHOLD ───
-FRESH_AGE_SEC = 60          # email < 60 detik = fresh → stop scan
-EARLY_RETURN = True         # kalau False, scan semua seperti v2 lama
+FRESH_AGE_SEC = 60
+EARLY_RETURN = True
 
 UAS = [
     "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
@@ -91,7 +90,7 @@ def parse_argv():
     def has(name):
         return f"--{name}" in args
     return {
-        "file": flag("file", "accounts-auth.json"),
+        "sessions": flag("sessions", "sessions"),
         "config": flag("config", "config.json"),
         "accounts": flag("accounts", "accounts.json"),
         "only": flag("only"), "exclude": flag("exclude"),
@@ -102,7 +101,7 @@ def parse_argv():
 
 
 ARGV = parse_argv()
-AUTH_FILE = ARGV["file"]
+SESSION_DIR = ARGV["sessions"]
 CONFIG_FILE = ARGV["config"]
 ACCOUNTS_FILE = ARGV["accounts"]
 ONLY = ARGV["only"]
@@ -120,7 +119,12 @@ DEFAULTS = {
     "maxDelayBetweenAccountsSec": 6,
     "rateLimitBackoffSec": 30,
     "refreshEndpoint": "/auth/refresh",
+
+    # ─── State / Session ───
     "resetStateOnStart": True,
+    "forceReloginOnStart": True,
+    "resetSessionOnRelogin": True,
+
     "autoRelogin": True,
     "reloginOn401": True,
     "logCsv": False,
@@ -357,21 +361,76 @@ def set_status(view, icon, color, text, detail=""):
 
 
 # ═══════════════════════════════════════════════════════════
-#  STORAGE
+#  STORAGE — satu file per akun
 # ═══════════════════════════════════════════════════════════
-def load_store():
-    if not os.path.exists(AUTH_FILE):
-        return {"createdAt": datetime.now(timezone.utc).isoformat(), "accounts": []}
+_session_locks: dict = {}
+
+
+def _session_lock(label):
+    if label not in _session_locks:
+        _session_locks[label] = asyncio.Lock()
+    return _session_locks[label]
+
+
+def session_file(label):
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", label)
+    return os.path.join(SESSION_DIR, f"{safe}.json")
+
+
+def load_session(label):
+    path = session_file(label)
+    if not os.path.exists(path):
+        return None
     try:
-        with open(AUTH_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"createdAt": datetime.now(timezone.utc).isoformat(), "accounts": []}
+        return None
 
 
-def save_store(data):
-    with open(AUTH_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+async def save_session(label, data):
+    async with _session_lock(label):
+        path = session_file(label)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+
+
+def delete_session(label):
+    """Hapus file session akun. Return True kalau file ada & terhapus."""
+    path = session_file(label)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def migrate_legacy_store():
+    legacy = "accounts-auth.json"
+    if not os.path.exists(legacy):
+        return
+    try:
+        with open(legacy, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        count = 0
+        for acc in data.get("accounts", []):
+            label = acc.get("label")
+            if not label:
+                continue
+            os.makedirs(SESSION_DIR, exist_ok=True)
+            with open(session_file(label), "w", encoding="utf-8") as f:
+                json.dump(acc, f, indent=2)
+            count += 1
+        os.rename(legacy, legacy + ".migrated")
+        print(f"✅ Migrated {count} account(s) from {legacy} → {SESSION_DIR}/")
+        print(f"   (backup: {legacy}.migrated)")
+    except Exception as e:
+        print(f"⚠️ migrate failed: {e}")
 
 
 DEFAULT_ACCOUNTS = {
@@ -644,9 +703,6 @@ class ImapOtpFetcher:
                 candidates = []
                 stop_scan = False
 
-                # ═══════════════════════════════════════════════════
-                #  SCAN EMAIL — dengan EARLY RETURN
-                # ═══════════════════════════════════════════════════
                 for eid in ids:
                     if stop_scan:
                         break
@@ -682,7 +738,6 @@ class ImapOtpFetcher:
                                 age = time.time() - email_ts
                                 log(f"         ts_age={int(age)}s (email {int(age/60)}m lalu)")
 
-                            # ─── FILTER ───
                             if "google.com" in from_low:
                                 log(f"         ⏭️ skip: google.com")
                                 continue
@@ -907,10 +962,9 @@ async def login_one(cfg, view=None, max_retry=None):
 #  REFRESH / RELOGIN / CALL WITH AUTH
 # ═══════════════════════════════════════════════════════════
 _refresh_locks: dict = {}
-_store_lock = asyncio.Lock()
 
 
-async def refresh_account(account, store):
+async def refresh_account(account):
     key = account.get("label") or account.get("username")
     while _refresh_locks.get(key):
         await _refresh_locks[key]
@@ -930,8 +984,7 @@ async def refresh_account(account, store):
         if d.get("refreshToken"):
             account["refreshToken"] = d["refreshToken"]
         account["refreshedAt"] = datetime.now(timezone.utc).isoformat()
-        async with _store_lock:
-            save_store(store)
+        await save_session(account["label"], account)
         return account
     finally:
         _refresh_locks.pop(key, None)
@@ -939,22 +992,22 @@ async def refresh_account(account, store):
             future.set_result(True)
 
 
-async def ensure_fresh(account, store, view=None):
+async def ensure_fresh(account, view=None):
     left = seconds_left(account.get("accessToken", ""))
     if left > 300:
         return
     set_status(view, "🔄", "cyan", "refresh token", f"exp {left}s")
     try:
-        await refresh_account(account, store)
+        await refresh_account(account)
     except Exception as e:
         if getattr(e, "status", 0) == 401 and CFG.get("reloginOn401") and CFG.get("autoRelogin"):
             set_status(view, "🔁", "cyan", "relogin")
-            await relogin_account(account, store, view)
+            await relogin_account(account, view)
         else:
             raise
 
 
-async def relogin_account(account, store, view=None):
+async def relogin_account(account, view=None):
     accounts = load_accounts(ACCOUNTS_FILE)
     cfg = None
     for a in accounts:
@@ -965,13 +1018,20 @@ async def relogin_account(account, store, view=None):
             break
     if not cfg:
         raise RuntimeError(f"no matching entry")
+
+    label = account.get("label") or "?"
+
+    if CFG.get("resetSessionOnRelogin", True):
+        log(f"[{label}] 🗑️ hapus session lama sebelum relogin")
+        delete_session(label)
+
     fresh = await login_one(cfg, view)
     if not fresh:
         raise RuntimeError("relogin failed")
+
     account.clear()
     account.update(fresh)
-    async with _store_lock:
-        save_store(store)
+    await save_session(label, account)
     return account
 
 
@@ -990,7 +1050,7 @@ async def silent_referral(account):
         return False
 
 
-async def call_with_auth(pathname, account, store, opts=None, view=None):
+async def call_with_auth(pathname, account, opts=None, view=None):
     opts = opts or {}
     try:
         return await raw(pathname, token=account.get("accessToken"),
@@ -999,13 +1059,13 @@ async def call_with_auth(pathname, account, store, opts=None, view=None):
         if getattr(e, "status", 0) != 401:
             raise
         try:
-            await refresh_account(account, store)
+            await refresh_account(account)
             return await raw(pathname, token=account.get("accessToken"),
                              method=opts.get("method", "GET"), body=opts.get("body"))
         except Exception as e2:
             if not (CFG.get("reloginOn401") and CFG.get("autoRelogin")):
                 raise e2
-            await relogin_account(account, store, view)
+            await relogin_account(account, view)
             return await raw(pathname, token=account.get("accessToken"),
                              method=opts.get("method", "GET"), body=opts.get("body"))
 
@@ -1046,19 +1106,19 @@ def extract_next_ad_at(err_body):
 # ═══════════════════════════════════════════════════════════
 #  CYCLE
 # ═══════════════════════════════════════════════════════════
-async def cycle(account, store, view=None):
+async def cycle(account, view=None):
     tag = account.get("label") or account.get("username")
-    await ensure_fresh(account, store, view)
+    await ensure_fresh(account, view)
     await silent_referral(account)
 
     set_status(view, "🚀", "cyan", "checking status")
-    d0 = (await call_with_auth("/mining/status", account, store, view=view))["data"]
+    d0 = (await call_with_auth("/mining/status", account, view=view))["data"]
     s0 = d0.get("session") or {}
 
     if d0.get("canActivate") and not s0.get("isRunning"):
         try:
             set_status(view, "🚀", "cyan", "starting session")
-            await call_with_auth("/mining/start", account, store, {"method": "POST"}, view)
+            await call_with_auth("/mining/start", account, {"method": "POST"}, view)
             log(f"[{tag}] 🚀 session started")
         except RuntimeError as e:
             log(f"[{tag}] ⚠️ start: {e}")
@@ -1074,7 +1134,7 @@ async def cycle(account, store, view=None):
     while watched < cap:
         try:
             set_status(view, "📺", "magenta", "watching ads", f"{watched}/{cap}")
-            r = await call_with_auth("/mining/ad", account, store, {"method": "POST"}, view)
+            r = await call_with_auth("/mining/ad", account, {"method": "POST"}, view)
             watched = (r.get("data", {}).get("session") or {}).get("adsWatched", watched + 1)
             boost = (r.get("data", {}).get("session") or {}).get("adBoostPct", 0)
             log(f"[{tag}] 📺 ad {watched}/{cap} +{boost}%")
@@ -1099,7 +1159,7 @@ async def cycle(account, store, view=None):
                 next_at = extract_next_ad_at(getattr(e, "body", None))
                 if not next_at:
                     try:
-                        st = (await call_with_auth("/mining/status", account, store, view=view))["data"]
+                        st = (await call_with_auth("/mining/status", account, view=view))["data"]
                         if (st.get("session") or {}).get("nextAdAt"):
                             next_at = datetime.fromisoformat(
                                 st["session"]["nextAdAt"].replace("Z", "+00:00")
@@ -1121,24 +1181,24 @@ async def cycle(account, store, view=None):
             await sleep_sec(10)
 
     set_status(view, "💰", "yellow", "checking claim")
-    fresh = (await call_with_auth("/mining/status", account, store, view=view))["data"]
+    fresh = (await call_with_auth("/mining/status", account, view=view))["data"]
     claimed = 0
 
     if fresh.get("canClaim") and (fresh.get("claimableAmount") or 0) > 0:
         try:
             set_status(view, "💰", "yellow", "claiming")
-            start = await call_with_auth("/mining/claim", account, store, {"method": "POST"}, view)
+            start = await call_with_auth("/mining/claim", account, {"method": "POST"}, view)
             claim_id = (start.get("data") or {}).get("claimId")
             final = None
             for i in range(10):
                 await sleep_sec(3)
                 set_status(view, "💰", "yellow", "claiming", f"poll {i+1}/10")
-                r = await call_with_auth(f"/mining/claim/{claim_id}", account, store, view=view)
+                r = await call_with_auth(f"/mining/claim/{claim_id}", account, view=view)
                 final = r.get("data")
                 if final and final.get("status") in ("completed", "failed"):
                     break
             if final and final.get("status") == "completed":
-                account["user"]["balance"] = final["balanceAfter"]
+                account.setdefault("user", {})["balance"] = final["balanceAfter"]
                 claimed = final["amount"]
                 log(f"[{tag}] 💰 claimed {fmt(final['amount'])} → {fmt(final['balanceAfter'])}")
                 await notify_webhook(f"💰 **{tag}** claimed {fmt(final['amount'])} → {fmt(final['balanceAfter'])}")
@@ -1147,7 +1207,7 @@ async def cycle(account, store, view=None):
         except RuntimeError as e:
             log(f"[{tag}] ⚠️ claim: {e}")
 
-    after = (await call_with_auth("/mining/status", account, store, view=view))["data"]
+    after = (await call_with_auth("/mining/status", account, view=view))["data"]
     s = after.get("session") or {}
     if view:
         view.balance = after.get("balance", view.balance)
@@ -1163,8 +1223,7 @@ async def cycle(account, store, view=None):
         f"+{s.get('adBoostPct', 0)}%  {fmt(after.get('currentHourlyReward'))}/hr")
 
     append_csv(account, after, claimed)
-    async with _store_lock:
-        save_store(store)
+    await save_session(account["label"], account)
 
     ads_done = (s.get("adsWatched") or 0) >= (s.get("adMaxPerSession") or 3)
     if not ads_done and s.get("isRunning"):
@@ -1201,7 +1260,8 @@ async def notify_webhook(msg):
 # ═══════════════════════════════════════════════════════════
 #  ACCOUNT WORKER
 # ═══════════════════════════════════════════════════════════
-async def account_worker(account, store, view):
+async def account_worker(account, view):
+    # ─── Reset state runtime dari sesi sebelumnya ───
     if CFG.get("resetStateOnStart", True):
         account["user"] = {k: v for k, v in (account.get("user") or {}).items()
                            if k in ("id", "email", "username")}
@@ -1217,31 +1277,32 @@ async def account_worker(account, store, view):
             view.error = ""
             view.last_msg = ""
 
-        while True:
-            try:
-                if view:
-                    view.cycles += 1
-                soonest = await cycle(account, store, view)
-                if soonest:
-                    wait_ms = max(10000, soonest - time.time() * 1000 + rand_int(2000, 8000))
-                else:
-                    wait_ms = INTERVAL
-                wait_ms = min(wait_ms, INTERVAL)
-                jitter = rand_int(-CFG["jitterSec"] * 1000, CFG["jitterSec"] * 1000)
-                wait_ms = max(10000, wait_ms + jitter)
-                wait_s = int(wait_ms / 1000)
-                if view:
-                    view.next_wake = time.time() + wait_s
-                    set_status(view, "💤", "grey50", "sleeping", f"{wait_s}s")
-                log(f"[{account.get('label')}] 💤 sleeping {wait_s}s...")
-                await sleep_sec(wait_ms / 1000)
-                if not LOOP:
-                    break
-            except Exception as e:
-                set_status(view, "❌", "red", "error", str(e)[:40])
-                log(f"[{account.get('label')}] ❌ {e}")
-                await notify_webhook(f"❌ **{account.get('label')}** {e}")
-                await sleep_sec(60)
+    while True:
+        try:
+            if view:
+                view.cycles += 1
+            soonest = await cycle(account, view)
+            if soonest:
+                wait_ms = max(10000, soonest - time.time() * 1000 + rand_int(2000, 8000))
+            else:
+                wait_ms = INTERVAL
+            wait_ms = min(wait_ms, INTERVAL)
+            jitter = rand_int(-CFG["jitterSec"] * 1000, CFG["jitterSec"] * 1000)
+            wait_ms = max(10000, wait_ms + jitter)
+            wait_s = int(wait_ms / 1000)
+            if view:
+                view.next_wake = time.time() + wait_s
+                set_status(view, "💤", "grey50", "sleeping", f"{wait_s}s")
+            log(f"[{account.get('label')}] 💤 sleeping {wait_s}s...")
+            await sleep_sec(wait_ms / 1000)
+            if not LOOP:
+                break
+        except Exception as e:
+            set_status(view, "❌", "red", "error", str(e)[:40])
+            log(f"[{account.get('label')}] ❌ {e}")
+            await notify_webhook(f"❌ **{account.get('label')}** {e}")
+            await sleep_sec(60)
+
 
 # ═══════════════════════════════════════════════════════════
 #  MAIN
@@ -1249,6 +1310,8 @@ async def account_worker(account, store, view):
 async def amain():
     init_log()
     console = Console()
+
+    migrate_legacy_store()
 
     try:
         account_cfg = load_accounts(ACCOUNTS_FILE)
@@ -1266,20 +1329,16 @@ async def amain():
         console.print("[red]❌ no accounts after filter[/red]")
         sys.exit(1)
 
-    store = load_store()
-    accounts = store.get("accounts", [])
     views = [AccountView(c["label"], c["email"]) for c in account_cfg]
 
-    # ─── Isi view dari token yang sudah ada (kalau ada) ───
+    # ─── Isi view dari session file yang sudah ada ───
+    force_relogin = CFG.get("forceReloginOnStart", False)
     for i, c in enumerate(account_cfg):
-        for a in accounts:
-            if (a.get("label") == c["label"]
-                or a.get("email") == c["email"]
-                or a.get("identifier") == c["email"]):
-                views[i].username = a.get("username", "")
-                views[i].balance = (a.get("user") or {}).get("balance", 0)
-                set_status(views[i], "⏳", "grey50", "starting")
-                break
+        sess = load_session(c["label"])
+        if sess and not force_relogin:
+            views[i].username = sess.get("username", "")
+            views[i].balance = (sess.get("user") or {}).get("balance", 0) or 0
+        set_status(views[i], "⏳", "grey50", "starting")
 
     dashboard = Dashboard(console, views)
     dashboard_task = asyncio.create_task(dashboard.run())
@@ -1291,67 +1350,34 @@ async def amain():
     # ═══════════════════════════════════════════════════════════
     workers = []
     for i, c in enumerate(account_cfg):
-        acc = None
-        for a in accounts:
-            if (a.get("label") == c["label"]
-                or a.get("email") == c["email"]
-                or a.get("identifier") == c["email"]):
-                acc = a
-                break
+        acc = load_session(c["label"])
+
+        # ─── forceReloginOnStart → hapus session & login ulang ───
+        if force_relogin and acc is not None:
+            log(f"[{c['label']}] 🔄 forceReloginOnStart → hapus session & login ulang")
+            delete_session(c["label"])
+            acc = None
+            if views[i]:
+                views[i].username = ""
+                views[i].balance = 0.0
+
         if acc is None:
-            acc = {
-                "label": c["label"],
-                "identifier": c["email"],
-                "email": c["email"],
-                "username": "",
-                "user": {},
-            }
-            accounts.append(acc)
-            store["accounts"] = accounts
-
-        # ─── Kalau belum punya token → login DULU (blocking) ───
-        #     Begitu login sukses, langsung spawn worker untuk mining.
-        #     Setelah itu baru lanjut ke akun berikutnya.
-        if not acc.get("accessToken"):
-            cfg = None
-            for a in load_accounts(ACCOUNTS_FILE):
-                if a["label"] == c["label"]:
-                    cfg = a
-                    break
-            if not cfg:
-                set_status(views[i], "❌", "red", "no config")
-                log(f"[{c['label']}] ❌ no matching config")
-                continue
-
-            fresh = await login_one(cfg, views[i])
+            # belum ada session → login dulu (blocking, sequential)
+            fresh = await login_one(c, views[i])
             if not fresh:
                 set_status(views[i], "❌", "red", "login failed")
                 log(f"[{c['label']}] ❌ login failed, skip")
                 continue
+            acc = fresh
+            await save_session(c["label"], acc)
 
-            acc.update(fresh)
-            async with _store_lock:
-                # update store
-                found = False
-                for a in store.get("accounts", []):
-                    if (a.get("label") == acc.get("label")
-                        or a.get("email") == acc.get("email")
-                        or a.get("identifier") == acc.get("identifier")):
-                        a.update(fresh)
-                        found = True
-                        break
-                if not found:
-                    store["accounts"].append(fresh)
-                save_store(store)
-
-        # ─── Sekarang akun ini siap → spawn worker → LANGSUNG mining ───
-        #     Worker jalan di background, spawn loop lanjut ke akun berikutnya.
+        # spawn worker → langsung mining di background
         workers.append(
-            asyncio.create_task(account_worker(acc, store, views[i]))
+            asyncio.create_task(account_worker(acc, views[i]))
         )
         log(f"[{c['label']}] ✅ worker spawned, lanjut akun berikutnya")
 
-        # jeda kecil biar rapi (opsional)
+        # jeda kecil antar spawn biar urut & tidak bentrok
         await asyncio.sleep(random.uniform(
             CFG.get("minDelayBetweenAccountsSec", 2),
             CFG.get("maxDelayBetweenAccountsSec", 6),
@@ -1379,8 +1405,6 @@ async def amain():
         for w in workers:
             w.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
-        async with _store_lock:
-            save_store(store)
         global _http_client
         if _http_client:
             try:
