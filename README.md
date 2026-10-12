@@ -26,11 +26,15 @@ Bot auto-mining untuk [Sible Network](https://mine.sible.network/ween) dengan au
 sible/
 ├── sible.py
 ├── .gitignore
+├── READMED.md
+│
+├── config.json
 ├── accounts.json
+│
 ├── sessions/
 │   ├── akun1.json
 │   ├── akun2.json
-├── config.json
+│
 ├── mining-log.csv
 └── debug/
     └── run.log
