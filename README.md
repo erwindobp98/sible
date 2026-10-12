@@ -24,16 +24,15 @@ Bot auto-mining untuk [Sible Network](https://mine.sible.network/ween) dengan au
 
 ```
 sible/
-├── sible.py                  # main script
-├── .gitignore
-├── README.md
-│
-├── config.json               # auto-generate saat pertama run
-├── accounts.json             # auto-generate saat pertama run
-├── accounts-auth.json        # token store (JANGAN di-share!)
-├── mining-log.csv            # auto-generate
+├── sible.py
+├── config.json
+├── accounts.json
+├── sessions/
+│   ├── akun1.json
+│   ├── akun2.json
+├── mining-log.csv
 └── debug/
-    └── run.log               # auto-generate
+    └── run.log
 ```
 
 ---
@@ -80,6 +79,9 @@ Field di bawah ini **persis sama** dengan `DEFAULTS` di dalam `sible.py`:
     "maxDelayBetweenAccountsSec": 6,
     "rateLimitBackoffSec": 30,
     "refreshEndpoint": "/auth/refresh",
+    "resetStateOnStart": true,
+    "forceReloginOnStart": true,
+    "resetSessionOnRelogin": true,
     "autoRelogin": true,
     "reloginOn401": true,
     "logCsv": false,
