@@ -1,5 +1,5 @@
 """
-Sible Mining Runner — IMAP Edition
+Sible Mining Runner
 """
 
 import asyncio
@@ -120,6 +120,7 @@ DEFAULTS = {
     "maxDelayBetweenAccountsSec": 6,
     "rateLimitBackoffSec": 30,
     "refreshEndpoint": "/auth/refresh",
+    "resetStateOnStart": True,
     "autoRelogin": True,
     "reloginOn401": True,
     "logCsv": False,
@@ -132,7 +133,7 @@ DEFAULTS = {
     # ─── IMAP ───
     "imapHost": "imap.gmail.com",
     "imapPort": 993,
-    "otpTimeoutSec": 30,
+    "otpTimeoutSec": 15,
     "otpPollIntervalSec": 3,
     "otpMaxAgeSec": 300,
     "otpSinceToleranceSec": 270,
@@ -967,6 +968,7 @@ async def relogin_account(account, store, view=None):
     fresh = await login_one(cfg, view)
     if not fresh:
         raise RuntimeError("relogin failed")
+    account.clear()
     account.update(fresh)
     async with _store_lock:
         save_store(store)
@@ -1200,31 +1202,46 @@ async def notify_webhook(msg):
 #  ACCOUNT WORKER
 # ═══════════════════════════════════════════════════════════
 async def account_worker(account, store, view):
-    while True:
-        try:
-            if view:
-                view.cycles += 1
-            soonest = await cycle(account, store, view)
-            if soonest:
-                wait_ms = max(10000, soonest - time.time() * 1000 + rand_int(2000, 8000))
-            else:
-                wait_ms = INTERVAL
-            wait_ms = min(wait_ms, INTERVAL)
-            jitter = rand_int(-CFG["jitterSec"] * 1000, CFG["jitterSec"] * 1000)
-            wait_ms = max(10000, wait_ms + jitter)
-            wait_s = int(wait_ms / 1000)
-            if view:
-                view.next_wake = time.time() + wait_s
-                set_status(view, "💤", "grey50", "sleeping", f"{wait_s}s")
-            log(f"[{account.get('label')}] 💤 sleeping {wait_s}s...")
-            await sleep_sec(wait_ms / 1000)
-            if not LOOP:
-                break
-        except Exception as e:
-            set_status(view, "❌", "red", "error", str(e)[:40])
-            log(f"[{account.get('label')}] ❌ {e}")
-            await notify_webhook(f"❌ **{account.get('label')}** {e}")
-            await sleep_sec(60)
+    if CFG.get("resetStateOnStart", True):
+        account["user"] = {k: v for k, v in (account.get("user") or {}).items()
+                           if k in ("id", "email", "username")}
+        if view:
+            view.balance = 0.0
+            view.rate = 0.0
+            view.ads_watched = 0
+            view.ads_max = 3
+            view.boost_pct = 0
+            view.running = False
+            view.cycles = 0
+            view.next_wake = 0.0
+            view.error = ""
+            view.last_msg = ""
+
+        while True:
+            try:
+                if view:
+                    view.cycles += 1
+                soonest = await cycle(account, store, view)
+                if soonest:
+                    wait_ms = max(10000, soonest - time.time() * 1000 + rand_int(2000, 8000))
+                else:
+                    wait_ms = INTERVAL
+                wait_ms = min(wait_ms, INTERVAL)
+                jitter = rand_int(-CFG["jitterSec"] * 1000, CFG["jitterSec"] * 1000)
+                wait_ms = max(10000, wait_ms + jitter)
+                wait_s = int(wait_ms / 1000)
+                if view:
+                    view.next_wake = time.time() + wait_s
+                    set_status(view, "💤", "grey50", "sleeping", f"{wait_s}s")
+                log(f"[{account.get('label')}] 💤 sleeping {wait_s}s...")
+                await sleep_sec(wait_ms / 1000)
+                if not LOOP:
+                    break
+            except Exception as e:
+                set_status(view, "❌", "red", "error", str(e)[:40])
+                log(f"[{account.get('label')}] ❌ {e}")
+                await notify_webhook(f"❌ **{account.get('label')}** {e}")
+                await sleep_sec(60)
 
 # ═══════════════════════════════════════════════════════════
 #  MAIN
