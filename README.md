@@ -101,31 +101,6 @@ Field di bawah ini **persis sama** dengan `DEFAULTS` di dalam `sible.py`:
     "loginMaxRetry": 5,
     "loginRetryDelaySec": 10
 }
-```
-
-| Field | Deskripsi |
-|-------|-----------|
-| `referralCode` | Kode referral (opsional, di-apply otomatis) |
-| `interval` | Interval default antar cycle (detik) — default 28920 |
-| `jitterSec` | Jitter random untuk hindari pola |
-| `minDelayBetweenAccountsSec` / `maxDelayBetweenAccountsSec` | Delay antar akun |
-| `rateLimitBackoffSec` | Waktu tunggu saat kena HTTP 429 |
-| `refreshEndpoint` | Endpoint refresh token |
-| `autoRelogin` | Auto-relogin kalau refresh gagal |
-| `reloginOn401` | Relogin kalau kena HTTP 401 |
-| `logCsv` | Aktifkan logging ke CSV |
-| `csvFile` | Nama file CSV output |
-| `discordWebhook` | URL webhook Discord (kosongkan jika tidak pakai) |
-| `quiet` | Matikan log ke stdout |
-| `debugRefresh` | Log detail refresh token |
-| `imapHost` / `imapPort` | Server IMAP Gmail |
-| `otpTimeoutSec` | Timeout tunggu OTP (detik) |
-| `otpPollIntervalSec` | Interval poll IMAP |
-| `otpMaxAgeSec` | Batas umur email OTP yang dianggap valid |
-| `otpSinceToleranceSec` | Toleransi timestamp saat search email |
-| `earlyReturnSec` | Kalau email < N detik → stop scan langsung |
-| `loginMaxRetry` | Jumlah percobaan login |
-| `loginRetryDelaySec` | Delay antar retry login |
 
 ---
 
