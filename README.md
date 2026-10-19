@@ -1,4 +1,4 @@
-# ⛏️ Sible Mining Runner
+# ⛏️ Sible Mining Runner (not part of the task)
 
 Bot auto-mining untuk [Sible Network](https://mine.sible.network/ween) dengan auto-login OTP via Gmail (IMAP), multi-akun, auto-claim, dan dashboard live berbasis Rich.
 
