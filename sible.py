@@ -30,8 +30,6 @@ from rich.text import Text
 # ═══════════════════════════════════════════════════════════
 BASE = "https://prod.sible.network/api/v1"
 ORIGIN = "https://mine.sible.network"
-
-FRESH_AGE_SEC = 60
 EARLY_RETURN = True
 
 UAS = [
@@ -41,10 +39,8 @@ UAS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 13; Infinix X6819) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
 ]
 
 LANGS = [
@@ -53,7 +49,6 @@ LANGS = [
 ]
 
 CH_VERSIONS = [str(v) for v in range(118, 141)]
-CH_PLATFORMS = ['"Android"', '"Android"', '"Android"', '"iOS"', '"Windows"', '"macOS"']
 
 
 def rnd(arr): return random.choice(arr)
@@ -67,17 +62,34 @@ def random_ua():
 
 
 def random_sec_ua(ua):
-    major = rnd(CH_VERSIONS)
-    mobile = "?1" if re.search(r"Mobile|Android|iPhone", ua or "", re.I) else "?0"
-    return {
-        "sec-ch-ua": f'"Chromium";v="{major}", "Not?A_Brand";v="24"',
-        "sec-ch-ua-mobile": mobile,
-        "sec-ch-ua-platform": rnd(CH_PLATFORMS),
+    ua_low = (ua or "").lower()
+    if "android" in ua_low:
+        platform = '"Android"'
+    elif "iphone" in ua_low or "ipad" in ua_low or "ios" in ua_low:
+        platform = '"iOS"'
+    elif "windows" in ua_low:
+        platform = '"Windows"'
+    elif "macintosh" in ua_low or "mac os x" in ua_low:
+        platform = '"macOS"'
+    else:
+        platform = '"Unknown"'
+
+    is_mobile = "?1" if any(x in ua_low for x in ("mobile", "android", "iphone")) else "?0"
+    headers = {
+        "sec-ch-ua-mobile": is_mobile,
+        "sec-ch-ua-platform": platform,
     }
+
+    is_chromium = any(x in ua_low for x in ("chrome", "chromium", "edg", "brave", "opera"))
+    if is_chromium:
+        major = rnd(CH_VERSIONS)
+        headers["sec-ch-ua"] = f'"Chromium";v="{major}", "Not?A_Brand";v="24"'
+
+    return headers
 
 
 # ═══════════════════════════════════════════════════════════
-#  CLI FLAGS
+#  CLI FLAGS & CONFIG
 # ═══════════════════════════════════════════════════════════
 def parse_argv():
     args = sys.argv[1:]
@@ -96,7 +108,6 @@ def parse_argv():
         "only": flag("only"), "exclude": flag("exclude"),
         "interval": flag("interval"),
         "once": has("once"), "loop": has("loop"),
-        "quiet": has("quiet"), "debug_refresh": has("debug-refresh"),
     }
 
 
@@ -108,9 +119,6 @@ ONLY = ARGV["only"]
 EXCLUDE = ARGV["exclude"]
 
 
-# ═══════════════════════════════════════════════════════════
-#  CONFIG
-# ═══════════════════════════════════════════════════════════
 DEFAULTS = {
     "referralCode": "ween",
     "interval": 28920,
@@ -118,34 +126,25 @@ DEFAULTS = {
     "minDelayBetweenAccountsSec": 2,
     "maxDelayBetweenAccountsSec": 6,
     "rateLimitBackoffSec": 30,
-    "refreshEndpoint": "/auth/refresh",
 
-    # ─── State / Session ───
     "resetStateOnStart": True,
-    "forceReloginOnStart": True,
+    "forceReloginOnStart": False,
     "resetSessionOnRelogin": True,
+    "postClaimSyncDelaySec": 2,
 
-    "autoRelogin": True,
-    "reloginOn401": True,
     "logCsv": False,
     "csvFile": "mining-log.csv",
     "discordWebhook": "",
-    "quiet": False,
-    "debugRefresh": True,
     "logDebug": False,
 
-    # ─── IMAP ───
     "imapHost": "imap.gmail.com",
     "imapPort": 993,
     "otpTimeoutSec": 15,
     "otpPollIntervalSec": 3,
     "otpMaxAgeSec": 300,
     "otpSinceToleranceSec": 270,
-
-    # ─── Early return ───
     "earlyReturnSec": 270,
 
-    # ─── Retry ───
     "loginMaxRetry": 5,
     "loginRetryDelaySec": 10,
 }
@@ -171,8 +170,6 @@ def ensure_config():
 CFG = ensure_config()
 INTERVAL = int(ARGV["interval"]) * 1000 if ARGV["interval"] else CFG["interval"] * 1000
 LOOP = ARGV["loop"] or not ARGV["once"]
-QUIET = ARGV["quiet"] or CFG.get("quiet", False)
-DEBUG_REFRESH = ARGV["debug_refresh"] or CFG.get("debugRefresh", True)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -219,7 +216,7 @@ def close_log():
 
 
 # ═══════════════════════════════════════════════════════════
-#  ACCOUNT VIEW
+#  ACCOUNT VIEW & DASHBOARD
 # ═══════════════════════════════════════════════════════════
 class AccountView:
     def __init__(self, label, email):
@@ -234,89 +231,82 @@ class AccountView:
         self.running = False
         self.cycles = 0
         self.next_wake = 0.0
-        self.last_msg = ""
         self.error = ""
         self.status_icon = "⏳"
         self.status_color = "grey50"
         self.status_text = "idle"
         self.status_detail = ""
 
+    def to_dict(self):
+        return {
+            "label": self.label,
+            "username": self.username,
+            "balance": self.balance,
+            "rate": self.rate,
+            "ads_watched": self.ads_watched,
+            "ads_max": self.ads_max,
+            "boost_pct": self.boost_pct,
+            "running": self.running,
+            "cycles": self.cycles,
+            "next_wake": self.next_wake,
+            "error": self.error,
+            "status_icon": self.status_icon,
+            "status_color": self.status_color,
+            "status_text": self.status_text,
+            "status_detail": self.status_detail,
+        }
 
-# ═══════════════════════════════════════════════════════════
-#  DASHBOARD
-# ═══════════════════════════════════════════════════════════
+
 class Dashboard:
     def __init__(self, console, views):
         self.console = console
         self.views = views
         self.start_time = time.time()
         self._live = None
-        self._paused = False
         self.stop = False
 
-    def pause(self):
-        if self._live and not self._paused:
-            try:
-                self._live.stop()
-                self._paused = True
-                return True
-            except Exception:
-                pass
-        return False
-
-    def resume(self, was_paused):
-        if was_paused and self._live:
-            try:
-                self._live.start()
-                self._paused = False
-            except Exception:
-                pass
-
     def _build_status_cell(self, v):
-        icon = v.status_icon
-        color = v.status_color
-        text = v.status_text
-        detail = v.status_detail
-        if detail:
-            return f"[{color}]{icon} {text}[/{color}] [grey50]· {detail}[/grey50]"
-        return f"[{color}]{icon} {text}[/{color}]"
+        if v["status_detail"]:
+            return f"[{v['status_color']}]{v['status_icon']} {v['status_text']}[/{v['status_color']}] [grey50]· {v['status_detail']}[/grey50]"
+        return f"[{v['status_color']}]{v['status_icon']} {v['status_text']}[/{v['status_color']}]"
 
     def render(self):
         now = time.time()
         panels = []
-        for v in self.views:
+        snapshots = [v.to_dict() for v in self.views]
+        
+        for v in snapshots:
             lines = []
             status_str = self._build_status_cell(v)
             lines.append(f"[grey50]Status [/grey50]  : {status_str}")
-            bal = fmt(v.balance) if v.balance else "-"
+            bal = fmt(v["balance"]) if v["balance"] else "-"
             lines.append(f"[grey50]Balance[/grey50]  : [green]{bal}[/green]")
-            rate = fmt(v.rate) if v.rate else "-"
+            rate = fmt(v["rate"]) if v["rate"] else "-"
             lines.append(f"[grey50]Rate/hr[/grey50]  : [green]{rate}[/green]")
-            ads = f"{v.ads_watched}/{v.ads_max}"
-            boost = f"+{v.boost_pct}%"
-            run = "[green]✓[/green]" if v.running else "[red]✗[/red]"
+            ads = f"{v['ads_watched']}/{v['ads_max']}"
+            boost = f"+{v['boost_pct']}%"
+            run = "[green]✓[/green]" if v["running"] else "[red]✗[/red]"
             lines.append(
                 f"[grey50]Ads[/grey50]      : [magenta]{ads}[/magenta]"
                 f"   [grey50]Boost[/grey50] : [green]{boost}[/green]"
                 f"   [grey50]Run[/grey50] : {run}"
             )
             next_in = ""
-            if v.next_wake > now:
-                next_in = f"{int(v.next_wake - now)}s"
-            elif v.next_wake > 0:
+            if v["next_wake"] > now:
+                next_in = f"{int(v['next_wake'] - now)}s"
+            elif v["next_wake"] > 0:
                 next_in = "now"
             lines.append(
-                f"[grey50]Cycle[/grey50]    : {v.cycles}"
+                f"[grey50]Cycle[/grey50]    : {v['cycles']}"
                 f"   [grey50]Next[/grey50] : {next_in or '-'}"
             )
-            err = v.error or v.last_msg or ""
-            if err:
-                lines.append(f"[red]{err[:60]}[/red]")
+            if v["error"]:
+                lines.append(f"[red]{v['error'][:60]}[/red]")
             content = "\n".join(lines)
-            title = f"[bold cyan]{v.username or v.label}[/bold cyan]"
-            if v.username and v.balance > 0:
+            title = f"[bold cyan]{v['username'] or v['label']}[/bold cyan]"
+            if v["username"] and v["balance"] > 0:
                 subtitle = "[green]logged in[/green]"
-            elif v.status_text in ("login failed", "error"):
+            elif v["status_text"] in ("login failed", "error"):
                 subtitle = "[red]failed[/red]"
             else:
                 subtitle = "[yellow]starting[/yellow]"
@@ -348,9 +338,6 @@ class Dashboard:
                 await asyncio.sleep(0.25)
 
 
-# ═══════════════════════════════════════════════════════════
-#  HELPER
-# ═══════════════════════════════════════════════════════════
 def set_status(view, icon, color, text, detail=""):
     if not view:
         return
@@ -361,7 +348,7 @@ def set_status(view, icon, color, text, detail=""):
 
 
 # ═══════════════════════════════════════════════════════════
-#  STORAGE — satu file per akun
+#  STORAGE
 # ═══════════════════════════════════════════════════════════
 _session_locks: dict = {}
 
@@ -399,7 +386,6 @@ async def save_session(label, data):
 
 
 def delete_session(label):
-    """Hapus file session akun. Return True kalau file ada & terhapus."""
     path = session_file(label)
     try:
         if os.path.exists(path):
@@ -428,7 +414,6 @@ def migrate_legacy_store():
             count += 1
         os.rename(legacy, legacy + ".migrated")
         print(f"✅ Migrated {count} account(s) from {legacy} → {SESSION_DIR}/")
-        print(f"   (backup: {legacy}.migrated)")
     except Exception as e:
         print(f"⚠️ migrate failed: {e}")
 
@@ -450,8 +435,6 @@ def load_accounts(file):
         with open(file, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_ACCOUNTS, f, indent=4)
         print(f"📝 Generated {file} — isi akun, lalu jalankan ulang.")
-        print(f"   ⚠️ gmailAppPassword = 16 karakter App Password")
-        print(f"   ⚠️ Buat di: https://myaccount.google.com/apppasswords")
         sys.exit(0)
     try:
         with open(file, "r", encoding="utf-8") as f:
@@ -476,11 +459,8 @@ def load_accounts(file):
         if missing:
             raise ValueError(f'account "{label}" missing fields: {", ".join(missing)}')
         if len(gmail_app) != 16:
-            raise ValueError(
-                f'account "{label}": gmailAppPassword harus 16 karakter (got {len(gmail_app)}).\n'
-                f'   Buat di: https://myaccount.google.com/apppasswords'
-            )
-
+            raise ValueError(f'account "{label}": gmailAppPassword harus 16 karakter.')
+            
         out.append({
             "label": label, "email": email_,
             "siblePassword": sible_password,
@@ -512,29 +492,15 @@ def append_csv(account, status, claimed):
 
 
 # ═══════════════════════════════════════════════════════════
-#  RATE LIMIT
+#  HTTP & UTILS
 # ═══════════════════════════════════════════════════════════
 _rate_limit_until = 0.0
-
-
-async def rate_limit_wait():
-    global _rate_limit_until
-    now = time.time() * 1000
-    if _rate_limit_until > now:
-        wait = (_rate_limit_until - now) / 1000
-        log(f"🛑 rate-limited, waiting {int(wait)}s")
-        await sleep_sec(wait)
+_http_client: Optional[httpx.AsyncClient] = None
 
 
 def trip_rate_limit():
     global _rate_limit_until
     _rate_limit_until = time.time() * 1000 + CFG["rateLimitBackoffSec"] * 1000
-
-
-# ═══════════════════════════════════════════════════════════
-#  HTTP
-# ═══════════════════════════════════════════════════════════
-_http_client: Optional[httpx.AsyncClient] = None
 
 
 async def get_http():
@@ -545,27 +511,37 @@ async def get_http():
 
 
 async def raw(pathname, method="GET", body=None, token=None, headers_extra=None):
-    await rate_limit_wait()
+    global _rate_limit_until
+    now = time.time() * 1000
+    if _rate_limit_until > now:
+        await sleep_sec((_rate_limit_until - now) / 1000)
+
     ua = (headers_extra or {}).get("user-agent") or random_ua()
     ch = random_sec_ua(ua)
+    
     headers = {
-        "accept": "*/*", "accept-language": rnd(LANGS),
+        "accept": "*/*", 
+        "accept-language": rnd(LANGS),
         "content-type": "application/json",
-        "origin": ORIGIN, "referer": ORIGIN + "/",
-        "sec-ch-ua": ch["sec-ch-ua"], "sec-ch-ua-mobile": ch["sec-ch-ua-mobile"],
-        "sec-ch-ua-platform": ch["sec-ch-ua-platform"],
-        "sec-fetch-dest": "empty", "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site", "user-agent": ua,
+        "origin": ORIGIN, 
+        "referer": ORIGIN + "/",
+        "sec-fetch-dest": "empty", 
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site", 
+        "user-agent": ua,
         "x-client-type": "web",
     }
+    
+    headers.update(ch) 
+    
     if headers_extra:
         headers.update(headers_extra)
     if token:
         headers["authorization"] = f"Bearer {token}"
+        
     client = await get_http()
     try:
-        r = await client.request(method, f"{BASE}{pathname}", headers=headers,
-                                 json=body if body else None)
+        r = await client.request(method, f"{BASE}{pathname}", headers=headers, json=body if body else None)
     except httpx.HTTPError as e:
         err = RuntimeError(f"network error on {pathname}: {e}")
         err.status = 0
@@ -588,9 +564,6 @@ async def raw(pathname, method="GET", body=None, token=None, headers_extra=None)
     return js
 
 
-# ═══════════════════════════════════════════════════════════
-#  JWT
-# ═══════════════════════════════════════════════════════════
 def seconds_left(jwt):
     try:
         payload = jwt.split(".")[1]
@@ -602,7 +575,7 @@ def seconds_left(jwt):
 
 
 # ═══════════════════════════════════════════════════════════
-#  IMAP OTP FETCHER (EARLY RETURN)
+#  IMAP OTP FETCHER
 # ═══════════════════════════════════════════════════════════
 class ImapOtpFetcher:
     def __init__(self, cfg):
@@ -662,15 +635,12 @@ class ImapOtpFetcher:
 
     def fetch_sync(self, gmail_address, gmail_app_password, since_ts):
         effective_since = since_ts - self.since_tolerance
-
         log(f"   📬 IMAP: connecting {self.host}:{self.port}...")
-        log(f"   ⏱️ since_ts={int(since_ts)} effective_since={int(effective_since)} (tolerance {self.since_tolerance}s)")
-
+        
         try:
             mail = imaplib.IMAP4_SSL(self.host, self.port)
             mail.login(gmail_address, gmail_app_password)
             mail.select("INBOX")
-            log(f"   ✅ IMAP: logged in")
         except Exception as e:
             log(f"   ❌ IMAP login failed: {e}")
             return None
@@ -681,7 +651,6 @@ class ImapOtpFetcher:
 
             while time.time() < deadline:
                 attempt += 1
-
                 since_date = (datetime.now() - timedelta(minutes=15)).strftime("%d-%b-%Y")
                 try:
                     typ, data = mail.search(None, f'(SINCE "{since_date}")')
@@ -689,18 +658,15 @@ class ImapOtpFetcher:
                     typ, data = mail.search(None, "ALL")
 
                 if typ != "OK":
-                    log(f"   ⚠️ IMAP search failed: {typ}")
                     time.sleep(self.poll)
                     continue
 
                 ids = data[0].split() if data and data[0] else []
                 if not ids:
-                    log(f"   attempt {attempt}: 0 email")
                     time.sleep(self.poll)
                     continue
 
                 ids = ids[-30:][::-1]
-                candidates = []
                 stop_scan = False
 
                 for eid in ids:
@@ -716,7 +682,7 @@ class ImapOtpFetcher:
                                 continue
 
                             msg = email.message_from_bytes(response_part[1])
-                            from_ = self._decode_header(msg.get("From", ""))
+                            from_ = self._decode_header(msg.get("From", "")).lower()
                             subject = self._decode_header(msg.get("Subject", ""))
                             body = self._get_body(msg)
 
@@ -728,54 +694,32 @@ class ImapOtpFetcher:
                                 except Exception:
                                     pass
 
-                            from_low = from_.lower()
                             subj_low = subject.lower()
                             body_low = body.lower()
 
-                            log(f"      📧 from='{from_[:50]}'")
-                            log(f"         subj='{subject[:60]}'")
-                            if email_ts:
-                                age = time.time() - email_ts
-                                log(f"         ts_age={int(age)}s (email {int(age/60)}m lalu)")
-
-                            if "google.com" in from_low:
-                                log(f"         ⏭️ skip: google.com")
+                            if "google.com" in from_:
                                 continue
-                            if "sible" not in from_low and "sible" not in subj_low:
-                                log(f"         ⏭️ skip: bukan sible")
+                            if "sible" not in from_ and "sible" not in subj_low:
                                 continue
                             if any(x in subj_low for x in ("reset", "password", "welcome")):
-                                log(f"         ⏭️ skip: reset/password/welcome")
                                 continue
 
                             looks_otp = (
-                                "verification" in subj_low
-                                or "code" in subj_low
-                                or "otp" in subj_low
-                                or "sign-in" in subj_low
-                                or "verify" in subj_low
-                                or "verification code" in body_low
+                                "verification" in subj_low or "code" in subj_low
+                                or "otp" in subj_low or "sign-in" in subj_low
+                                or "verify" in subj_low or "verification code" in body_low
                                 or "your code" in body_low
                             )
                             if not looks_otp:
-                                log(f"         ⏭️ skip: bukan OTP")
                                 continue
 
                             if email_ts:
                                 if email_ts < effective_since:
-                                    delta = int(effective_since - email_ts)
-                                    log(f"         ⏹️ email terlalu lama ({delta}s) — STOP SCAN")
-                                    log(f"   ⏹️ IMAP: email ini & seterusnya lebih lama dari effective_since, tunggu {self.poll}s...")
                                     stop_scan = True
                                     break
                                 if (time.time() - email_ts) > self.max_age:
-                                    delta = int(time.time() - email_ts)
-                                    log(f"         ⏹️ email expired ({delta}s > {self.max_age}s) — STOP SCAN")
-                                    log(f"   ⏹️ IMAP: email ini & seterusnya lebih lama dari max_age, tunggu {self.poll}s...")
                                     stop_scan = True
                                     break
-
-                            log(f"         ✅ KANDIDAT!")
 
                             match = re.search(r"\b(\d{6})\b", body)
                             if not match:
@@ -783,36 +727,13 @@ class ImapOtpFetcher:
                             if match:
                                 code = match.group(1)
                                 age = (time.time() - email_ts) if email_ts else 9999
-                                log(f"         🎯 code = {code} (age {int(age)}s)")
-
-                                candidates.append({
-                                    "code": code,
-                                    "subject": subject,
-                                    "date": email_ts or 0,
-                                })
-
-                                if EARLY_RETURN:
-                                    if age <= self.early_return_sec:
-                                        log(f"   ⚡ email fresh ({int(age)}s ≤ {self.early_return_sec}s) — STOP SCAN")
-                                    else:
-                                        log(f"   ⚡ kandidat valid ({int(age)}s) — STOP SCAN")
-                                    log(f"   ✅ IMAP: OTP = {code} (\"{subject[:40]}\")")
+                                if EARLY_RETURN or age <= self.early_return_sec:
+                                    log(f"   ✅ IMAP: OTP = {code}")
                                     return code
 
-                    except Exception as e:
-                        log(f"      ⚠️ error parsing: {e}")
+                    except Exception:
                         continue
-
-                if candidates:
-                    candidates.sort(key=lambda x: x["date"], reverse=True)
-                    pick = candidates[0]
-                    log(f"   ✅ IMAP: OTP = {pick['code']} (\"{pick['subject'][:40]}\")")
-                    return pick["code"]
-
-                log(f"   attempt {attempt}: {len(ids)} email, 0 kandidat")
                 time.sleep(self.poll)
-
-            log(f"   ❌ IMAP: OTP timeout")
             return None
         finally:
             try:
@@ -827,9 +748,6 @@ class ImapOtpFetcher:
         )
 
 
-# ═══════════════════════════════════════════════════════════
-#  LOGIN ONE (WITH RETRY)
-# ═══════════════════════════════════════════════════════════
 _imap_fetcher = None
 
 
@@ -840,6 +758,9 @@ def get_imap_fetcher():
     return _imap_fetcher
 
 
+# ═══════════════════════════════════════════════════════════
+#  AUTH & LOGIN
+# ═══════════════════════════════════════════════════════════
 async def login_one(cfg, view=None, max_retry=None):
     if max_retry is None:
         max_retry = CFG.get("loginMaxRetry", 2)
@@ -857,61 +778,46 @@ async def login_one(cfg, view=None, max_retry=None):
             set_status(view, "🔐", "blue", "login", f"{attempt}/{max_retry}")
 
         ua = random_ua()
-
         set_status(view, "🔐", "blue", "login Sible")
-        log(f"🔐 POST /auth/login...")
         login_started = time.time()
+
         try:
             login_resp = await raw("/auth/login", method="POST",
                                    body={"identifier": email_, "password": password},
                                    headers_extra={"user-agent": ua})
         except RuntimeError as e:
             set_status(view, "❌", "red", "login failed", str(e)[:40])
-            log(f"❌ login: {e}")
-            if view:
-                view.error = str(e)[:50]
             if attempt < max_retry:
-                log(f"🔄 retry dalam {retry_delay}s...")
                 await sleep_sec(retry_delay)
                 continue
             return None
 
         if not (login_resp.get("data") or {}).get("needsOtp"):
             set_status(view, "⚠️", "yellow", "unexpected response")
-            log(f"⚠️ needsOtp false")
             if attempt < max_retry:
-                log(f"🔄 retry dalam {retry_delay}s...")
                 await sleep_sec(retry_delay)
                 continue
             return None
 
         otp_email = login_resp["data"].get("email") or email_
-        log(f"📧 OTP → {otp_email}")
-
         set_status(view, "📬", "yellow", "reading OTP", "(IMAP)")
-        log(f"📬 IMAP scan OTP...")
+        
         try:
             fetcher = get_imap_fetcher()
             code = await fetcher.fetch(gmail_address, gmail_app, login_started)
         except Exception as e:
             set_status(view, "❌", "red", "OTP failed", str(e)[:40])
-            log(f"❌ IMAP failed: {e}")
             if attempt < max_retry:
-                log(f"🔄 retry dalam {retry_delay}s...")
                 await sleep_sec(retry_delay)
                 continue
             return None
 
         if not code:
             set_status(view, "❌", "red", "OTP not found")
-            log(f"❌ OTP tidak ketemu")
             if attempt < max_retry:
-                log(f"🔄 retry dalam {retry_delay}s...")
                 await sleep_sec(retry_delay)
                 continue
             return None
-
-        log(f"✅ OTP: {code}")
 
         set_status(view, "🔐", "blue", "verifying OTP")
         try:
@@ -920,9 +826,7 @@ async def login_one(cfg, view=None, max_retry=None):
                                     headers_extra={"user-agent": ua})
         except RuntimeError as e:
             set_status(view, "❌", "red", "verify failed", str(e)[:40])
-            log(f"❌ verify: {e}")
             if attempt < max_retry:
-                log(f"🔄 retry dalam {retry_delay}s...")
                 await sleep_sec(retry_delay)
                 continue
             return None
@@ -937,7 +841,6 @@ async def login_one(cfg, view=None, max_retry=None):
 
         username = d["user"]["username"]
         balance = d["user"].get("balance", 0)
-        log(f"✅ {username}  bal={balance}")
         if view:
             view.username = username
             view.balance = balance
@@ -954,13 +857,9 @@ async def login_one(cfg, view=None, max_retry=None):
             "user": d["user"],
         }
 
-    log(f"❌ {label}: login failed after {max_retry} attempts")
     return None
 
 
-# ═══════════════════════════════════════════════════════════
-#  REFRESH / RELOGIN / CALL WITH AUTH
-# ═══════════════════════════════════════════════════════════
 _refresh_locks: dict = {}
 
 
@@ -974,8 +873,7 @@ async def refresh_account(account):
         left = seconds_left(account.get("accessToken", ""))
         if left > 60:
             return account
-        endpoint = CFG.get("refreshEndpoint") or "/auth/refresh"
-        r = await raw(endpoint, method="POST",
+        r = await raw("/auth/refresh", method="POST",
                       body={"refreshToken": account.get("refreshToken", "")})
         d = r.get("data") or {}
         if not d.get("accessToken"):
@@ -983,7 +881,6 @@ async def refresh_account(account):
         account["accessToken"] = d["accessToken"]
         if d.get("refreshToken"):
             account["refreshToken"] = d["refreshToken"]
-        account["refreshedAt"] = datetime.now(timezone.utc).isoformat()
         await save_session(account["label"], account)
         return account
     finally:
@@ -996,12 +893,10 @@ async def ensure_fresh(account, view=None):
     left = seconds_left(account.get("accessToken", ""))
     if left > 300:
         return
-    set_status(view, "🔄", "cyan", "refresh token", f"exp {left}s")
     try:
         await refresh_account(account)
     except Exception as e:
-        if getattr(e, "status", 0) == 401 and CFG.get("reloginOn401") and CFG.get("autoRelogin"):
-            set_status(view, "🔁", "cyan", "relogin")
+        if getattr(e, "status", 0) == 401:
             await relogin_account(account, view)
         else:
             raise
@@ -1009,20 +904,12 @@ async def ensure_fresh(account, view=None):
 
 async def relogin_account(account, view=None):
     accounts = load_accounts(ACCOUNTS_FILE)
-    cfg = None
-    for a in accounts:
-        if (a["email"] == account.get("email")
-            or a["email"] == account.get("identifier")
-            or a["label"] == account.get("label")):
-            cfg = a
-            break
+    cfg = next((a for a in accounts if a["label"] == account.get("label")), None)
     if not cfg:
-        raise RuntimeError(f"no matching entry")
+        raise RuntimeError("no matching entry")
 
     label = account.get("label") or "?"
-
     if CFG.get("resetSessionOnRelogin", True):
-        log(f"[{label}] 🗑️ hapus session lama sebelum relogin")
         delete_session(label)
 
     fresh = await login_one(cfg, view)
@@ -1062,9 +949,7 @@ async def call_with_auth(pathname, account, opts=None, view=None):
             await refresh_account(account)
             return await raw(pathname, token=account.get("accessToken"),
                              method=opts.get("method", "GET"), body=opts.get("body"))
-        except Exception as e2:
-            if not (CFG.get("reloginOn401") and CFG.get("autoRelogin")):
-                raise e2
+        except Exception:
             await relogin_account(account, view)
             return await raw(pathname, token=account.get("accessToken"),
                              method=opts.get("method", "GET"), body=opts.get("body"))
@@ -1088,11 +973,8 @@ def extract_next_ad_at(err_body):
     except Exception:
         pass
     paths.append(get(err_body, "error", "nextAdAt"))
-    paths.append(get(err_body, "error", "data", "nextAdAt"))
-    paths.append(get(err_body, "details", "nextAdAt"))
-    paths.append(get(err_body, "nextAdAt"))
     paths.append(get(err_body, "data", "nextAdAt"))
-    paths.append(get(err_body, "data", "session", "nextAdAt"))
+    paths.append(get(err_body, "nextAdAt"))
     for p in paths:
         if not p:
             continue
@@ -1104,7 +986,51 @@ def extract_next_ad_at(err_body):
 
 
 # ═══════════════════════════════════════════════════════════
-#  CYCLE
+#  PRE-FLIGHT HEALTH CHECK (FIXED)
+# ═══════════════════════════════════════════════════════════
+async def preflight_check(acc, view, cfg_account):
+    """
+    Panggil /users/me untuk memvalidasi token.
+    Jika email dari server tidak cocok dengan email di accounts.json, anggap mismatch.
+    """
+    token = acc.get("accessToken")
+    if not token:
+        return False
+        
+    label = cfg_account["label"]
+    expected_email = cfg_account["email"]
+    
+    set_status(view, "🔄", "cyan", "health check")
+    log(f"[{label}] 🩺 pre-flight check pakai token lama...")
+    
+    try:
+        r = await raw("/users/me", token=token)
+        d = r.get("data") or {}
+        server_user = d.get("username")
+        server_email = d.get("email")
+
+        if not server_email:
+            log(f"[{label}] ⚠️ /users/me tidak mengembalikan email. Anggap invalid.")
+            return False
+
+        if server_email.lower() != expected_email.lower():
+            log(f"[{label}] 🚨 Session mismatch! Dapat: {server_user} ({server_email}), Harap: {label} ({expected_email})")
+            return False
+            
+        if view:
+            view.username = server_user
+            view.balance = d.get("balance", view.balance)
+            set_status(view, "✅", "green", "health OK", server_user)
+            
+        log(f"[{label}] ✅ Health check OK ({server_user})")
+        return True
+    except Exception as e:
+        log(f"[{label}] ⚠️ Health check failed: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════
+#  CYCLE (MINING LOOP)
 # ═══════════════════════════════════════════════════════════
 async def cycle(account, view=None):
     tag = account.get("label") or account.get("username")
@@ -1119,25 +1045,23 @@ async def cycle(account, view=None):
         try:
             set_status(view, "🚀", "cyan", "starting session")
             await call_with_auth("/mining/start", account, {"method": "POST"}, view)
-            log(f"[{tag}] 🚀 session started")
         except RuntimeError as e:
             log(f"[{tag}] ⚠️ start: {e}")
 
     cap = s0.get("adMaxPerSession") or d0.get("adMaxPerSession") or 3
     watched = s0.get("adsWatched") or 0
-    attempts_409 = 0
-    MAX_409 = 6
     if view:
         view.ads_max = cap
         view.ads_watched = watched
 
+    # ─── FASE 1: NONTON IKLAN ───
+    attempts_409 = 0
     while watched < cap:
         try:
             set_status(view, "📺", "magenta", "watching ads", f"{watched}/{cap}")
             r = await call_with_auth("/mining/ad", account, {"method": "POST"}, view)
             watched = (r.get("data", {}).get("session") or {}).get("adsWatched", watched + 1)
             boost = (r.get("data", {}).get("session") or {}).get("adBoostPct", 0)
-            log(f"[{tag}] 📺 ad {watched}/{cap} +{boost}%")
             if view:
                 view.ads_watched = watched
                 view.boost_pct = boost
@@ -1146,7 +1070,6 @@ async def cycle(account, view=None):
         except RuntimeError as e:
             status = getattr(e, "status", 0)
             if status == 429:
-                set_status(view, "🛑", "red", "rate limited", "30s")
                 await sleep_sec(30)
                 continue
             if status == 409:
@@ -1154,7 +1077,7 @@ async def cycle(account, view=None):
                 if code == "AD_CLAIM_REQUIRED":
                     break
                 attempts_409 += 1
-                if attempts_409 > MAX_409:
+                if attempts_409 > 6:
                     break
                 next_at = extract_next_ad_at(getattr(e, "body", None))
                 if not next_at:
@@ -1167,19 +1090,16 @@ async def cycle(account, view=None):
                     except Exception:
                         pass
                 if next_at and next_at > time.time() * 1000:
-                    wait_ms = min(max(3000, next_at - time.time() * 1000 + rand_int(1000, 3000)),
-                                  5 * 60 * 1000)
-                    set_status(view, "⏳", "yellow", "next ad", f"{int(wait_ms/1000)}s")
+                    wait_ms = min(max(3000, next_at - time.time() * 1000 + rand_int(1000, 3000)), 5 * 60 * 1000)
                     await sleep_sec(wait_ms / 1000)
                     continue
-                set_status(view, "⏳", "yellow", "409 wait", "60s")
                 await sleep_sec(60)
                 continue
-            set_status(view, "⚠️", "yellow", "ad error", str(e)[:30])
             break
         if watched < cap:
             await sleep_sec(10)
 
+    # ─── FASE 2: CLAIM ───
     set_status(view, "💰", "yellow", "checking claim")
     fresh = (await call_with_auth("/mining/status", account, view=view))["data"]
     claimed = 0
@@ -1204,9 +1124,20 @@ async def cycle(account, view=None):
                 await notify_webhook(f"💰 **{tag}** claimed {fmt(final['amount'])} → {fmt(final['balanceAfter'])}")
                 if view:
                     view.balance = final["balanceAfter"]
+                
+                # ─── POST-CLAIM SYNC ───
+                sync_delay = CFG.get("postClaimSyncDelaySec", 2)
+                await sleep_sec(sync_delay)
+                try:
+                    await call_with_auth("/mining/start", account, {"method": "POST"}, view)
+                    await sleep_sec(1) 
+                except Exception:
+                    pass
+                        
         except RuntimeError as e:
             log(f"[{tag}] ⚠️ claim: {e}")
 
+    # ─── FASE 3: AMBIL STATE AKHIR ───
     after = (await call_with_auth("/mining/status", account, view=view))["data"]
     s = after.get("session") or {}
     if view:
@@ -1261,7 +1192,6 @@ async def notify_webhook(msg):
 #  ACCOUNT WORKER
 # ═══════════════════════════════════════════════════════════
 async def account_worker(account, view):
-    # ─── Reset state runtime dari sesi sebelumnya ───
     if CFG.get("resetStateOnStart", True):
         account["user"] = {k: v for k, v in (account.get("user") or {}).items()
                            if k in ("id", "email", "username")}
@@ -1272,10 +1202,6 @@ async def account_worker(account, view):
             view.ads_max = 3
             view.boost_pct = 0
             view.running = False
-            view.cycles = 0
-            view.next_wake = 0.0
-            view.error = ""
-            view.last_msg = ""
 
     while True:
         try:
@@ -1293,13 +1219,11 @@ async def account_worker(account, view):
             if view:
                 view.next_wake = time.time() + wait_s
                 set_status(view, "💤", "grey50", "sleeping", f"{wait_s}s")
-            log(f"[{account.get('label')}] 💤 sleeping {wait_s}s...")
             await sleep_sec(wait_ms / 1000)
             if not LOOP:
                 break
         except Exception as e:
             set_status(view, "❌", "red", "error", str(e)[:40])
-            log(f"[{account.get('label')}] ❌ {e}")
             await notify_webhook(f"❌ **{account.get('label')}** {e}")
             await sleep_sec(60)
 
@@ -1310,29 +1234,20 @@ async def account_worker(account, view):
 async def amain():
     init_log()
     console = Console()
-
     migrate_legacy_store()
 
-    try:
-        account_cfg = load_accounts(ACCOUNTS_FILE)
-    except Exception as e:
-        console.print(f"[red]❌ {e}[/red]")
-        sys.exit(1)
-    if not account_cfg:
-        console.print("[red]❌ no accounts[/red]")
-        sys.exit(1)
+    account_cfg = load_accounts(ACCOUNTS_FILE)
     if ONLY:
         account_cfg = [c for c in account_cfg if c["label"] == ONLY or c["email"] == ONLY]
     if EXCLUDE:
         account_cfg = [c for c in account_cfg if c["label"] != EXCLUDE and c["email"] != EXCLUDE]
+    
     if not account_cfg:
-        console.print("[red]❌ no accounts after filter[/red]")
         sys.exit(1)
 
     views = [AccountView(c["label"], c["email"]) for c in account_cfg]
-
-    # ─── Isi view dari session file yang sudah ada ───
     force_relogin = CFG.get("forceReloginOnStart", False)
+
     for i, c in enumerate(account_cfg):
         sess = load_session(c["label"])
         if sess and not force_relogin:
@@ -1343,53 +1258,40 @@ async def amain():
     dashboard = Dashboard(console, views)
     dashboard_task = asyncio.create_task(dashboard.run())
 
-    # ═══════════════════════════════════════════════════════════
-    #  Spawn worker secara SEQUENTIAL untuk login (hindari rate limit),
-    #  TAPI begitu satu akun selesai login, worker-nya LANGSUNG
-    #  jalan mining di background — tidak nunggu akun lain login.
-    # ═══════════════════════════════════════════════════════════
     workers = []
     for i, c in enumerate(account_cfg):
         acc = load_session(c["label"])
 
-        # ─── forceReloginOnStart → hapus session & login ulang ───
         if force_relogin and acc is not None:
-            log(f"[{c['label']}] 🔄 forceReloginOnStart → hapus session & login ulang")
             delete_session(c["label"])
             acc = None
-            if views[i]:
-                views[i].username = ""
-                views[i].balance = 0.0
 
+        need_login = False
         if acc is None:
-            # belum ada session → login dulu (blocking, sequential)
+            need_login = True
+        else:
+            # Mengirim objek `c` (dari accounts.json) agar pengecekan email akurat
+            is_valid = await preflight_check(acc, views[i], c)
+            if not is_valid:
+                log(f"[{c['label']}] 🗑️ Session bermasalah/mismatch → hapus & login ulang")
+                delete_session(c["label"])
+                need_login = True
+
+        if need_login:
             fresh = await login_one(c, views[i])
             if not fresh:
-                set_status(views[i], "❌", "red", "login failed")
-                log(f"[{c['label']}] ❌ login failed, skip")
                 continue
             acc = fresh
             await save_session(c["label"], acc)
 
-        # spawn worker → langsung mining di background
-        workers.append(
-            asyncio.create_task(account_worker(acc, views[i]))
-        )
-        log(f"[{c['label']}] ✅ worker spawned, lanjut akun berikutnya")
+        workers.append(asyncio.create_task(account_worker(acc, views[i])))
 
-        # jeda kecil antar spawn biar urut & tidak bentrok
         await asyncio.sleep(random.uniform(
             CFG.get("minDelayBetweenAccountsSec", 2),
             CFG.get("maxDelayBetweenAccountsSec", 6),
         ))
 
     if not workers:
-        console.print("[red]❌ no workers[/red]")
-        dashboard.stop = True
-        try:
-            await asyncio.wait_for(dashboard_task, timeout=3)
-        except Exception:
-            pass
         sys.exit(1)
 
     try:
@@ -1398,19 +1300,11 @@ async def amain():
         pass
     finally:
         dashboard.stop = True
-        try:
-            await asyncio.wait_for(dashboard_task, timeout=3)
-        except Exception:
-            pass
         for w in workers:
             w.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
-        global _http_client
         if _http_client:
-            try:
-                await _http_client.aclose()
-            except Exception:
-                pass
+            await _http_client.aclose()
 
 
 def main():
